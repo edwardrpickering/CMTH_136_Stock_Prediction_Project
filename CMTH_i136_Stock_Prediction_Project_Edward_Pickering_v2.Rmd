@@ -1,0 +1,1295 @@
+---
+title: "CMTH_136_Stock_Prediction_Project - Edward Pickering"
+author: "Edward Pickering"
+date: "March 17, 2019"
+output: html_document
+---
+
+```{r}
+
+#################
+## Preparation ##
+#################
+
+# Install R packages for Stock Technical Analysis
+'''{r install packages, echo = FALSE}
+install.packages("quantmod")
+install.packages("TTR")
+install.packages("PerformanceAnalytics")
+install.packages("ggplot2")
+'''
+
+#Load R packages for Stock Technical Analysis
+library("quantmod")
+library("TTR")
+library("PerformanceAnalytics")
+library("ggplot2")
+```
+
+
+#####################
+## Data Collection ##
+#####################
+
+## The sudy period is going to be the 30 year period from January 1, 1989 to December 31, 2018.  Extra data is 
+## collected and will be removed after data exploration and cleaning have been performed. 
+```{r}
+# Download SP500 Index Data
+getSymbols("^GSPC", src = "yahoo",
+           from = as.Date("1980-01-01"), to = as.Date("2019-03-16"))
+```
+
+
+
+######################
+## Data Exploration ##
+######################
+
+
+```{r}
+# Count total number of rows
+nrow(GSPC)
+##  9866 total rows of data
+```
+
+
+```{r}
+# Display head and tail of data
+head(GSPC)
+tail(GSPC)
+```
+
+
+```{r}
+# Look at the class of data
+class(GSPC)
+```
+
+## We can see that GSPC is a xts zoo object in R.  XTS is an object that allows for the storage of time-series
+## data in R by indexing the time/date column. It is an extension to the S3 class from the zoo package hence
+## the class showing as "xts" and "zoo".
+
+
+```{r}
+# Look at the structure and dimensions of the data
+str(GSPC)
+dim(GSPC)
+
+# Look at summary statistics for the data
+summary(GSPC)
+```
+
+## "It is common in financial literature to use the colosing price only when working with discrete-time 
+## fixed frequency data.  This holds for indicators, rule sets and performance metrics" (Conlan, 2016).  
+## In fact Yahoo Finance includes the Adjusted Close price (GSPC.Adjusted) of an asset that takes account of
+## stock splits or dividends.   
+
+## The technical indicators that will be derived from the data will use adjusted close price. 
+```{r}
+# Check for missing data
+sum(is.na(GSPC$GSPC.Adjusted))
+# 0 missing data.  Data for the project is secured. 
+```
+## To plots of the data it is necessary to store the data in a data frame rather than xts format. 
+
+# save the data in a data.frame format
+sp500.df <- data.frame(
+  index(GSPC),
+  coredata(GSPC),
+  stringsAsFactors=FALSE
+)
+```{r}
+# display head of new data frame
+head(sp500.df)
+```
+
+
+```{r}
+#plot adjusted close overtime
+plot(x = sp500.df$index.GSPC.,
+     y = sp500.df$GSPC.Adjusted,
+     type = "l",
+     xlab = "Date",
+     ylab = "Closing Value",
+     main = "S&P 500 Adjusted Closing Value Since 1990"
+)
+
+```
+
+
+## "Although the actual price movement may also be useful, it is in many cases helpful to look at 
+## logarithmicprices.  Exponential development - which is the result of cumulated growth over time - 
+## is translated into alinear trend of the logarithmic prices and shows as a straight line trend when you 
+## graph the logarithmic prices". (Feuct, 2018).  "Most traders and charting programs us the logarithmic scale"
+## (Investopedia, 2018) and therefore this work will also use the logarithmic adjusted returns. 
+
+
+```{r}
+# Plot the log adjusted returns on a logarithmic scale
+plot(x = sp500.df$index.GSPC,
+     y = sp500.df$GSPC.Adjusted,
+     type = "l",
+     xlab = "Date",
+     ylab = "Closing Value",
+     log = "y",
+     main = "S&P 500 Adjusted Closing Value Since 1990(Logarithmic Scale)"
+)
+```
+
+## The return from a price change can be viewed as either a discrete return or as a continuous logarithmic 
+## return.  The continuous logarithmic return is favoured in finance as it describes continuously compounded
+## returns (Feuct, 2018).  
+
+## As we can see the plot does not approximate the normal distribution.  The other reason for using 
+## the logarithmic scale for calculating returns is that the discrete return can never have the desired property
+## of following a Gaussian normal distribution.  If we use the log continuous returns we can demonstrate that
+## the data approximates the normal distribution. 
+
+
+```{r}
+# Continuous Adjusted Close Return
+GSPC$Con_daily_return <- diff.xts(log(GSPC$GSPC.Adjusted), lag = 1)
+```
+
+```{r}
+#Check head of new xts.object
+head(GSPC)
+```
+
+
+```{r}
+# Remove NAs created by calcualtion of daily return
+GSPC <- na.exclude(GSPC)
+```
+
+
+  
+```{r}
+# Recheck head 
+head(GSPC)
+```
+
+```{r}
+# Plot the daily returns as a time series
+plot(GSPC$Con_daily_return,
+     main = "S&P 500 - Daily Logarithmic Adjusted Returns",
+     xlab = "Date",
+     ylab = "Returns")
+```
+
+
+```{r}
+#Before creating a Histogram of the returns calcualte mean and volatility(standard deviation) for GSPC.
+GSPC_mu <- mean(GSPC$Con_daily_return)
+GSPC_vol <- sd(GSPC$Con_daily_return)
+```
+
+
+```{r}
+#Plot Histogram of S&P 500 returns
+hist(GSPC$Con_daily_return,
+     main = "Histogram of S&P 500 - Daily Logarithmic Returns",
+     breaks = 100, 
+     freq = FALSE, 
+     xlab = "Daily Return", 
+     plot = TRUE
+)
+```
+
+
+```{r}
+#Plot density function of a normal distripution and add it to the above histogram for comparison
+normdist <- function(x){dnorm(x, mean = GSPC_mu, sd = GSPC_vol)}
+
+curve(normdist, from = -0.1, to = +0.1, add = TRUE, col = "red", lwd = 2)
+```
+
+
+## Notice that the histogram does not exactly mirror a normal distribution.  There are more scores close to 
+## the mean than the normal distrbution would suggest. Extreme positive or negative returns also happen more
+## often than they should if they follwed the normal distribution giving the appearance for 'heavy tails'. 
+## This is typical of stock market data. 
+
+```{r}
+#Boxplot to look for outliers
+chart.Boxplot(GSPC)
+```
+
+
+## The size of the GSPC.Volume attribute makes the remaining plots difficult to see. 
+
+```{r}
+# Create copy of GSPC_1 data for boxplot
+GSPC.box <- GSPC
+
+# Remove GSPC.Volume
+GSPC.box$GSPC.Volume <- NULL
+
+#Boxplot remaining GSCP variables
+chart.Boxplot(GSPC.box)
+
+# Boxplot remaining GSPC variables
+chart.Boxplot(GSPC.box)
+```
+
+
+## The actual prices show that the that there are a number of outliers to the right of the plot.  This suggests
+## a number of days when SPY has had valuations in excess of what would be expected.  Due to the scale 
+## differences between the actual and logarithmic returns the continuous daily return is still difficult to 
+## and needs to be visualized again.  
+
+```{r}
+#Boxplot Con_daily_return on it's own
+chart.Boxplot(GSPC$Con_daily_return)
+```
+
+
+## The boxplot shows looks to have a more normal distribution (positively skewed) with a considerable number of 
+## outliers to either side.  With a preponderance of outliers to the left and one extreme value to the left. 
+## These will need further investigation.
+
+```{r}
+#Plot histogram of density
+chart.Histogram(GSPC$Con_daily_return[,1,drop=F], main = "Density", breaks=40, methods = c("add.density", "add.normal"))
+```
+
+
+```{r}
+#Plot skew and kurtosis
+chart.Histogram(GSPC$Con_daily_return[,1,drop=F], main = "Skew and Kurt", methods = c("add.centered", "add.rug"))
+```
+
+
+## The boxplot identified a number of outliers in the current data.  The histogram of density that show the 
+## normal distribution and the density confirm what was noted earlier about the approximation of the normal 
+## distribution with a preponderance of scores around the mean and longer tails.  The skew and kurtosis plot
+## show no skew and and confirm a leptokuric distribution.  This means there is a preponderance of scores around
+## the mean and that is caused by occasional extreme outliers.  This noisy distribution is part of what 
+## makes predicting the stock market such a challenge and keeps people investing/trading. The large 
+## occassional market move that cause the outliers is an integral part of the puzzle for stock market 
+## prediction.  Replacing some of the outliers would be an option but removing them would not make sense due
+## the relation of time-series data.  For these reasons it has been decided for now to move forward with 
+## the remainder of the analysis without treating outliers at the moment. 
+
+##################
+## Derived Data ##
+##################
+
+## In 2003, Kim used 12 technical indicators to train his Support Vector Machine (SVM) to predict stock price
+## movement.  The www.stockcharts.com website details 55 different Technical Overlays and Technical Indicators
+## that investors can use to make their predictions.    The TTR package in R provides tools to calculate up to 
+## 42 technical indicators from stock data.  The remainder of this section will calculate the relevant indicators 
+## for the current data.  In each case the function may give the possibliity to calculate multiple values
+## in each case I will calculate a value for each available call on the function.  For all other potential 
+## variables in a function the default values will be used. 
+
+# 1.  Calculate Split and dividend adjusted ratios - not necessary as quantmod/yahoo provide adjusted close
+# values
+
+```{r}
+# 2.  Calculate Welles Wilder's Directional Movement Index
+wwdmi <- ADX(HLC(GSPC))
+head(wwdmi)
+tail(wwdmi)
+str(wwdmi)
+summary(wwdmi)
+
+# 3.  Calculate Aroon
+aroon20 <- aroon(c(GSPC$GSPC.High, GSPC$GSPC.Low), n = 20)
+head(aroon20)
+tail(aroon20)
+str(aroon20)
+summary(aroon20)
+
+# 4. Calculate True Range/Average True Range
+atr14 <- ATR(HLC(GSPC))
+head(atr14)
+tail(atr14)
+str(atr14)
+summary(atr14)
+
+# 5. Calculate Bollinger Bands High, Low, Close
+bbands20 <- BBands(HLC(GSPC))
+head(bbands20)
+tail(bbands20)
+str(bbands20)
+summary(bbands20)
+
+# 6. Calculate Commodity Channel Index(CCI)
+cci20 <- CCI(HLC(GSPC))
+head(cci20)
+tail(cci20)
+str(cci20)
+summary(cci20)
+
+# 7. Calculate Chaikin Accumuluation / Distribution
+chaikin_ad <- chaikinAD(HLC(GSPC), GSPC$GSPC.Volume)
+head(chaikin_ad)
+tail(chaikin_ad)
+str(chaikin_ad)
+summary(chaikin_ad)
+
+# 8.  Calculate Chainkin Volatility
+chaikin_vol <- chaikinVolatility(HLC(GSPC))
+head(chaikin_vol)
+tail(chaikin_vol)
+str(chaikin_vol)
+summary(chaikin_vol)
+
+# 9. Calculate Close Location Value
+close_lv <- CLV(HLC(GSPC))
+head(close_lv)
+tail(close_lv)
+str(close_lv)
+summary(close_lv)
+
+# 10. Calculate Chaikin Money Flow
+chaikin_mf <- CMF(HLC(GSPC), GSPC$GSPC.Volume)
+head(chaikin_mf)
+tail(chaikin_mf)
+str(chaikin_mf)
+summary(chaikin_mf)
+
+# 11. Calculate Chande Momentum Oscillator
+cmo <- CMO(GSPC$GSPC.Close)
+head(cmo)
+tail(cmo)
+str(cmo)
+summary(cmo)
+
+# 12. Calculate Donchian Channel
+dc <- DonchianChannel(GSPC$GSPC.High, GSPC$GSPC.Low)
+head(dc)
+tail(dc)
+str(dc)
+summary(dc)
+
+# 13. Calculate Price De-Trended Price Oscillator
+price_dpo <- DPO(GSPC$GSPC.Close)
+head(price_dpo)
+tail(price_dpo)
+str(price_dpo)
+summary(price_dpo)
+
+# 14. Calculate Volume De-Trended Price Oscillator
+volume_dpo <- DPO(GSPC$GSPC.Volume)
+head(volume_dpo)
+tail(volume_dpo)
+str(volume_dpo)
+summary(volume_dpo)
+
+# 15.  Calculate DV Intermediate Oscillator
+dvi <- DVI(GSPC$GSPC.Close)
+head(dvi)
+tail(dvi)
+str(dvi)
+summary(dvi)
+
+# 16. Calculate Arms' Ease of Movement Value
+emv <- EMV(HLC(GSPC), GSPC$GSPC.Volume)
+head(emv)
+tail(emv)
+str(emv)
+summary(emv)
+
+# 17. Calculate Guppy Mul]tiple Moving Averages
+gmma <- GMMA(GSPC$GSPC.Close)
+head(gmma)
+tail(gmma)
+str(gmma)
+summary(gmma)
+
+# 18. Calculate Know Sure Thing
+kst <- KST(GSPC$GSPC.Close)
+head(kst)
+tail(kst)
+str(kst)
+summary(kst)
+
+# 19. Calculate Know Sure Thing with 4 Moving Averages
+kst4ma <- KST(GSPC$GSPC.Close,
+              maType = list(list(SMA), list(EMA), list(DEMA), list(WMA)))
+head(kst4ma)
+tail(kst4ma)
+str(kst4ma)
+summary(kst4ma)
+
+# 20. Calculate MACD Oscillator
+macd <- MACD(GSPC$GSPC.Close, 12, 26, 9, maType = "EMA")
+head(macd)
+tail(macd)
+str(macd)
+summary(macd)
+
+# 21. Calculate MACD Oscillator with 3 Moving Averages
+macd2 <- MACD(GSPC$GSPC.Close, 12, 26, 9,
+              maType = list(list(SMA), list(EMA, wilder = TRUE), list(SMA)))
+head(macd2)
+tail(macd2)
+str(macd2)
+summary(macd2)
+
+# 22. Calculate Money Flow Index
+mfi <- MFI(HLC(GSPC), GSPC$GSPC.Volume)
+head(mfi)
+tail(mfi)
+str(mfi)
+summary(mfi)
+
+# 23. Calculate On Balance Volume
+obv <- OBV(GSPC$GSPC.Close, GSPC$GSPC.Volume)
+head(obv)
+tail(obv)
+str(obv)
+summary(obv)
+
+# 24. Calcualte Volatility Price Bands
+pbands <- PBands(GSPC$GSPC.Close)
+head(pbands)
+tail(pbands)
+str(pbands)
+summary(pbands)
+
+# 25. Calculate Rate of Change
+roc <- ROC(GSPC$GSPC.Close)
+head(roc)
+tail(roc)
+str(roc)
+summary(roc)
+
+# 26. Calculate Momentum
+mom <- momentum(GSPC$GSPC.Close)
+head(mom)
+tail(mom)
+str(mom)
+summary(mom)
+
+# 27. Calculate RSI
+rsi <- RSI(GSPC$GSPC.Close)
+head(rsi)
+tail(rsi)
+str(rsi)
+summary(rsi)
+
+# 28. Calculate RSI of one Moving Average Type for both Moving Averages
+rsima1 <- RSI(GSPC$GSPC.Close, n = 14, maType = "WMA", wts = GSPC$GSPC.Volume)
+head(rsima1)
+tail(rsima1)
+str(rsima1)
+summary(rsima1)
+
+# 29.  Calculate RSI of two different Moving averages for both moving averages
+rsima2 <- RSI(GSPC$GSPC.Close, n = 14, maType = list(maUp = list(EMA, ratio = 1/5),
+                                                     maDown = list(WMA, wts = 1:10)))
+head(rsima2)
+tail(rsima2)
+str(rsima2)
+summary(rsima2)
+
+# 30. Calculate Percent Rank over a Moving Window
+percent_rank <- runPercentRank(GSPC$GSPC.Close, n = 260, cumulative = FALSE, exact.multiplier = 0.5)
+head(percent_rank)
+tail(percent_rank)
+str(percent_rank)
+summary(percent_rank)
+
+# 31. Calculate Sum over a 10 day rolling window
+runsum10 <- runSum(GSPC$GSPC.Close)
+head(runsum10)
+tail(runsum10)
+str(runsum10)
+summary(runsum10)
+
+# 32. Calculate Minimun over a 10 day rolling window
+runmin10 <- runMin(GSPC$GSPC.Close)
+head(runmin10)
+tail(runmin10)
+str(runmin10)
+summary(runmin10)
+
+# 33. Calculate Maximum over a 10 day rolling window
+runmax10 <- runMax(GSPC$GSPC.Close)
+head(runmax10)
+tail(runmax10)
+str(runmax10)
+summary(runmax10)
+
+# 34. Calculate Mean over a 10 day rolling window
+runmean10 <- runMean(GSPC$GSPC.Close)
+head(runmean10)
+tail(runmean10)
+str(runmean10)
+summary(runmean10)
+
+#35. Calculate Median over a 10 day rolling window
+runmedian10 <- runMedian(GSPC$GSPC.Close)
+head(runmedian10)
+tail(runmedian10)
+str(runmedian10)
+summary(runmedian10)
+
+#36. Calculate Standard Deviation over a 10 day rolling window
+runsd10 <- runSD(GSPC$GSPC.Close) 
+head(runsd10)
+tail(runsd10)
+str(runsd10)
+summary(runsd10)
+
+#37. Calculate mean/median deviations over a 10 day rolling window
+runmad10 <- runMAD(GSPC$GSPC.Close)
+head(runmad10)
+tail(runmad10)
+str(runmad10)
+summary(runmad10)
+
+#38. Calcualte weight sum over a 10 day rolling window
+wildersum10 <- wilderSum(GSPC$GSPC.Close)
+head(wildersum10)
+tail(wildersum10)
+str(wildersum10)
+summary(wildersum10)
+
+#39. Calculate Parabolic Stop and Reverse
+sar <- SAR(HLC(GSPC))
+head(sar)
+tail(sar)
+str(sar)
+summary(sar)
+
+# 40. Calculate simple 10 day moving average
+sma10 <- SMA(GSPC$GSPC.Close)
+head(sma10)
+tail(sma10)
+str(sma10)
+summary(sma10)
+
+# 41. Calculate exponentially weighted 10 day average
+ema10 <- EMA(GSPC$GSPC.Close) 
+head(ema10)
+tail(ema10)
+str(ema10)
+summary(ema10)
+
+# 42. Calcualte double exponential weighted 10 day moving average
+dema10 <- DEMA(GSPC$GSPC.Close)
+head(dema10)
+tail(dema10)
+str(dema10)
+summary(dema10)
+
+# 43. Calculate weighted 10 day moving average
+wma10 <- WMA(GSPC$GSPC.Close)
+head(wma10)
+tail(wma10)
+str(wma10)
+summary(wma10)
+
+# 44. Calculate elastic, volume weighted 10 day moving average
+evwma10 <- EVWMA(GSPC$GSPC.Close, GSPC$GSPC.Volume)
+head(evwma10)
+tail(evwma10)
+str(evwma10)
+summary(evwma10)
+
+# 45 Calculate Zero lag exponential 10 day moving average
+zlema10 <- ZLEMA(GSPC$GSPC.Close)
+head(zlema10)
+tail(zlema10)
+str(zlema10)
+summary(zlema10)
+
+# 46. Calculate Volume weighted 10 day average price
+vwap10 <- VWAP(GSPC$GSPC.Close, GSPC$GSPC.Volume)
+head(vwap10)
+tail(vwap10)
+str(vwap10)
+summary(vwap10)
+
+# 47. Calculate Hull 20 day moving average
+hma20 <- HMA(GSPC$GSPC.Close)
+head(hma20)
+tail(hma20)
+str(hma20)
+summary(hma20)
+
+# 48. Calculate Arnaud Legoux 9 day moving average
+alma9 <- ALMA(GSPC$GSPC.Close)
+head(alma9)
+tail(alma9)
+str(alma9)
+summary(alma9)
+
+# 49. Calculate simple 20 day moving average
+sma20 <- SMA(GSPC$GSPC.Close, 20)
+head(sma20)
+tail(sma20)
+str(sma20)
+summary(sma20)
+
+# 50. Calculate double expoential 20 day moving average
+dema20 <- DEMA(GSPC$GSPC.Close, 20)
+head(dema20)
+tail(dema20)
+str(dema20)
+summary(dema20)
+
+# 51. Calculate elastic, volume weighted 20 day moving average
+evwma20 <- EVWMA(GSPC$GSPC.Close, GSPC$GSPC.Volume, 20)
+head(evwma20)
+tail(evwma20)
+str(evwma20)
+summary(evwma20)
+
+# 52. Calculate Zero lag exponential 20 day moving average 
+zlema20 <- ZLEMA(GSPC$GSPC.Close, 20)
+head(zlema20)
+tail(zlema20)
+str(zlema20)
+summary(zlema20)
+
+# 53. Calculate Signal to Noise Ratio over 10 days
+snr10 <- SNR(HLC(GSPC), 10)
+head(snr10)
+tail(snr10)
+str(snr10)
+summary(snr10)
+
+# 54. Calculate signal to norise ratio over 20 days
+snr20 <- SNR(HLC(GSPC), 20)
+head(snr20)
+tail(snr20)
+str(snr20)
+summary(snr20)
+
+# 55. Calculate Stochastic Oscillators
+stoch_osc <- stoch(HLC(GSPC))
+head(stoch_osc)
+tail(stoch_osc)
+str(stoch_osc)
+summary(stoch_osc)
+
+# 56. Calculate Stochastic Momentum Indexes
+stoch_smi <- SMI(HLC(GSPC))
+head(stoch_smi)
+tail(stoch_smi)
+str(stoch_smi)
+summary(stoch_smi)
+
+# 57. Calculate Stochastic WPR 
+stoch_wpr <- WPR(HLC(GSPC))
+head(stoch_wpr)
+tail(stoch_wpr)
+str(stoch_wpr)
+summary(stoch_wpr)
+
+# 58. Calculate stochastic 2MA
+stoch_2ma <- stoch(HLC(GSPC),
+                   maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA)) )
+head(stoch_2ma)
+tail(stoch_2ma)
+str(stoch_2ma)
+summary(stoch_2ma)
+
+# 59. Calculate SMI 3MA
+smi_3ma <- SMI(HLC(GSPC),
+               maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA)) )
+head(smi_3ma)
+tail(smi_3ma)
+str(smi_3ma)
+summary(smi_3ma)
+
+# 60 Calculate stochastic RSI
+stoch_rsi <- stoch(RSI(GSPC$GSPC.Close))
+head(stoch_rsi)
+tail(stoch_rsi)
+str(stoch_rsi)
+summary(stoch_rsi)
+
+# 61 Calculate Trend Detection Index 20 days
+tdi20 <- TDI(GSPC$GSPC.Close)
+head(tdi20)
+tail(tdi20)
+str(tdi20)
+summary(tdi20)
+
+# 62. Calculate Trend Detection Index 30 days
+tdi30 <- TDI(GSPC$GSPC.Close, 30)
+head(tdi30)
+tail(tdi30)
+str(tdi30)
+summary(tdi30)
+
+# 63. Calculate Triple Smoothed Exponential Oscillator
+trix20 <- TRIX(GSPC$GSPC.Close)
+head(trix20)
+tail(trix20)
+str(trix20)
+summary(trix20)
+
+# 64. Calculate TRIX 4 moving averages
+trix_4 <- TRIX(GSPC$GSPC.Close,
+               maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA), list(DEMA)))
+head(trix_4)
+tail(trix_4)
+str(trix_4)
+summary(trix_4)
+
+# 65. Calculate ultimate oscillator
+ult_osc <- ultimateOscillator(HLC(GSPC))
+head(ult_osc)
+tail(ult_osc)
+str(ult_osc)
+summary(ult_osc)
+
+# 66. Calculate vertical horizontal filter close
+vhf_close <- VHF(GSPC$GSPC.Close)
+head(vhf_close)
+tail(vhf_close)
+str(vhf_close)
+summary(vhf_close)
+
+# 67. Calculate vertical horizontal filter High low
+vhf_hilo <- VHF(HLC(GSPC))
+head(vhf_hilo)
+tail(vhf_hilo)
+str(vhf_hilo)
+summary(vhf_hilo)
+
+# Create ohlc to calculate various volatility
+ohlc <- GSPC[c(GSPC$GSPC.Open, GSPC$GSPC.High, GSPC$GSPC.Low, GSPC$GSPC.Close)]
+
+# 68. Calculate close to close volatility
+v_close <- volatility(ohlc, calc = "close")
+head(v_close)
+tail(v_close)
+str(v_close)
+summary(v_close)
+
+# 69. Calculate close to close with a mean of 0 volatility
+v_close0 <- volatility(ohlc, calc="close", mean0=TRUE)
+head(v_close0)
+tail(v_close0)
+str(v_close0)
+summary(v_close0)
+
+# 70. Calcualte garman volatility
+v_gk <- volatility(ohlc, calc="garman")
+head(v_gk)
+tail(v_gk)
+str(v_gk)
+summary(v_gk)
+
+# 71. Calculate parkinson volatility
+v_par <- volatility(ohlc, calc = "parkinson")
+head(v_par)
+tail(v_par)
+str(v_par)
+summary(v_par)
+
+# 72. Calculate rogers satchell volatility
+v_rogsat <- volatility(ohlc, calc = "rogers.satchell")
+head(v_rogsat)
+tail(v_rogsat)
+str(v_rogsat)
+summary(v_rogsat)
+
+# 73. Calculate garman klass yang zhang volatility
+v_gkyz <- volatility(ohlc, calc = "gk.yz")
+head(v_gkyz)
+tail(v_gkyz)
+str(v_gkyz)
+summary(v_gkyz)
+
+# 74. Calculate yang zhang volatility
+v_yz <- volatility(ohlc, calc = "yang.zhang")
+head(v_yz)
+tail(v_yz)
+str(v_yz)
+summary(v_yz)
+
+# 75. Calculate Williams Accumulation / Distribution
+williams_ad <- williamsAD(HLC(GSPC))
+head(williams_ad)
+tail(williams_ad)
+str(williams_ad)
+summary(williams_ad)
+
+# 76. Calculate Williams % R
+wpr <- WPR(HLC(GSPC))
+head(wpr)
+tail(wpr)
+str(wpr)
+summary(wpr)
+
+# 77. Calculate Zig Zag 10
+zigzag10 <- ZigZag(GSPC$GSPC.High, GSPC$GSPC.Low)
+head(zigzag10)
+tail(zigzag10)
+str(zigzag10)
+summary(zigzag10)
+
+#78. Calculate Zig Zag 20
+zigzag20 <- ZigZag(GSPC$GSPC.High, GSPC$GSPC.Low, 20)
+head(zigzag20)
+tail(zigzag20)
+str(zigzag20)
+summary(zigzag20)
+```
+
+
+```{r}
+#Combine all data
+my_data <- merge(GSPC, alma9, join = "left")
+my_data <- merge(my_data, aroon20, join = "left")
+my_data <- merge(my_data, atr14, join = "left")
+my_data <- merge(my_data, bbands20, join = "left")
+my_data <- merge(my_data, cci20, join = "left")
+my_data <- merge(my_data, chaikin_ad, join = "left")
+my_data <- merge(my_data, chaikin_mf, join = "left")
+my_data <- merge(my_data, chaikin_vol, join = "left")
+my_data <- merge(my_data, close_lv, join = "left")
+my_data <- merge(my_data, cmo, join = "left")
+my_data <- merge(my_data, dc, join = "left")
+my_data <- merge(my_data, dema10, join = "left")
+my_data <- merge(my_data, dema20, join = "left")
+my_data <- merge(my_data, dvi, join = "left")
+my_data <- merge(my_data, ema10, join = "left")
+my_data <- merge(my_data, emv, join = "left")
+my_data <- merge(my_data, evwma10, join = "left")
+my_data <- merge(my_data, evwma20, join = "left")
+my_data <- merge(my_data, gmma, join = "left")
+my_data <- merge(my_data, hma20, join = "left")
+my_data <- merge(my_data, kst, join = "left")
+my_data <- merge(my_data, kst4ma, join = "left")
+my_data <- merge(my_data, macd, join = "left")
+my_data <- merge(my_data, macd2, join = "left")
+my_data <- merge(my_data, mfi, join = "left")
+my_data <- merge(my_data, mom, join = "left")
+my_data <- merge(my_data, obv, join = "left")
+my_data <- merge(my_data, pbands, join = "left")
+my_data <- merge(my_data, percent_rank, join = "left")
+my_data <- merge(my_data, price_dpo, join = "left")
+my_data <- merge(my_data, roc, join = "left")
+my_data <- merge(my_data, rsi, join = "left")
+my_data <- merge(my_data, rsima1, join = "left")
+my_data <- merge(my_data, rsima2, join = "left")
+my_data <- merge(my_data, runmad10, join = "left")
+my_data <- merge(my_data, runmax10, join = "left")
+my_data <- merge(my_data, runmean10, join = "left")
+my_data <- merge(my_data, runmin10, join = "left")
+my_data <- merge(my_data, runsd10, join = "left")
+my_data <- merge(my_data, runsum10, join = "left")
+my_data <- merge(my_data, sar, join = "left")
+my_data <- merge(my_data, sma10, join = "left")
+my_data <- merge(my_data, sma20, join = "left")
+my_data <- merge(my_data, smi_3ma, join = "left")
+my_data <- merge(my_data, snr10, join = "left")
+my_data <- merge(my_data, snr20, join = "left")
+my_data <- merge(my_data, stoch_2ma, join = "left")
+my_data <- merge(my_data, stoch_osc, join = "left")
+my_data <- merge(my_data, stoch_rsi, join = "left")
+my_data <- merge(my_data, stoch_smi, join = "left")
+my_data <- merge(my_data, stoch_wpr, join = "left")
+my_data <- merge(my_data, tdi20, join = "left")
+my_data <- merge(my_data, tdi30, join = "left")
+my_data <- merge(my_data, trix_4, join = "left")
+my_data <- merge(my_data, trix20, join = "left")
+my_data <- merge(my_data, ult_osc, join = "left")
+my_data <- merge(my_data, v_close, join = "left")
+my_data <- merge(my_data, v_close0, join = "left")
+my_data <- merge(my_data, v_gk, join = "left")
+my_data <- merge(my_data, v_gkyz, join = "left")
+my_data <- merge(my_data, v_par, join = "left")
+my_data <- merge(my_data, v_rogsat, join = "left")
+my_data <- merge(my_data, v_yz, join = "left")
+my_data <- merge(my_data, vhf_close, join = "left")
+my_data <- merge(my_data, vhf_hilo, join = "left")
+my_data <- merge(my_data, volume_dpo, join = "left")
+my_data <- merge(my_data, vwap10, join = "left")
+my_data <- merge(my_data, wildersum10, join = "left")
+my_data <- merge(my_data, williams_ad, join = "left")
+my_data <- merge(my_data, wma10, join = "left")
+my_data <- merge(my_data, wpr, join = "left")
+my_data <- merge(my_data, wwdmi, join = "left")
+my_data <- merge(my_data, zigzag10, join = "left")
+my_data <- merge(my_data, zigzag20, join = "left")
+my_data <- merge(my_data, zlema10, join = "left")
+my_data <- merge(my_data, zlema20, join = "left")
+
+```
+
+```{r}
+#Review data
+head(my_data)
+tail(my_data)
+str(my_data)
+summary(my_data)
+View(my_data)
+
+```
+
+```{r}
+## Reduce data to the 30 year period from January 1, 1989 to December 31, 2018. 
+my_data <- my_data[index(my_data) >= "1989-01-01"]
+my_data <- my_data[index(my_data) <= "2018-12-30"]
+```
+
+
+```{r}
+#inspect data
+head(my_data)
+tail(my_data)
+summary(my_data)
+dim(my_data)
+```
+
+
+## The measures of volatility produced 6960 NAs.  That is 92% missing data and will therefore be removed from 
+## the final data
+
+```{r}
+# remove volitality measures with large amounts of missing data
+my_data$v_close <- NULL
+my_data$v_close0 <- NULL
+my_data$v_gk <- NULL
+my_data$v_gkyz <- NULL
+my_data$v_par <- NULL
+my_data$v_rogsat <- NULL
+my_data$v_yz <- NULL
+
+```
+
+```{r}
+# inspect the data
+summary(my_data)
+sum(is.na(my_data))
+tail(my_data, n = 70)
+
+```
+
+## zigzag10 and zigzag20 have 67 missing values each at the bottom because of the way they are calculated.  
+## these values could be imputed by a number of methods (KNN, Replace with Mean, Forward Propagation).  On this 
+## occassion because the number of missing data points is so small and they are at the bottom of the object so 
+## their removal will not cause any disruption to the time-series
+
+```{r}
+# Remove NAs
+my_data <- na.omit(my_data)
+
+# Count number of rows and columns in final data
+nrow(my_data)
+ncol(my_data)
+```
+
+
+#######################
+## Feature Selection ##
+#######################
+
+#################
+## Correlation ##
+#################
+
+```{r}
+#convert to data.frame
+my_data_frame <- fortify.zoo(my_data)
+
+```
+
+```{r}
+#check class
+class(my_data_frame)
+```
+
+
+```{r}
+#review structure
+head(my_data_frame)
+str(my_data_frame)
+```
+
+
+```{r}
+#create data_frame with target variable
+Daily_return <- subset(my_data_frame, select = c("Index", "Con_daily_return"))
+```
+
+
+```{r}
+#inspect new data.frame
+head(Daily_return)
+class(Daily_return)
+```
+
+
+```{r}
+#create new data_frame with all variables but the index
+my_data_cor <- my_data_frame[c(-1)]
+
+```
+
+```{r}
+#inspect correlation data.frame
+head(my_data_cor)
+```
+
+
+```{r}
+# Produce correlation matrix independent variables
+cor_matrix <- round(cor(my_data_cor), 3)
+```
+
+
+```{r}
+# View the correlation matrix
+View(cor_matrix)
+```
+
+
+```{r}
+# Install packages to visualize the correlation matrix
+install.packages("corrplot")
+```
+
+
+```{r}
+#load library
+library("corrplot")
+```
+
+
+```{r}
+# Plot the correlation matrix
+corrplot(cor_matrix)
+```
+
+
+```{r}
+#install packages for other correlation manipulation
+install.packates("mlbench")
+install.packages("caret")
+```
+
+
+```{r}
+#load libraries
+library("mlbench")
+library("caret")
+```
+
+
+```{r}
+#Find correlations above .8
+head(cor_matrix)
+hc <- findCorrelation(cor_matrix, cutoff = 0.8)
+hc <- sort(hc)
+```
+
+
+```{r}
+#Inspect columns to remove
+cols_to_remove <- cor_matrix[, c(hc)]
+ncol(cols_to_remove)
+colnames(cols_to_remove)
+```
+
+
+```{r}
+#Create copy of my_data_frame
+my_df1 <- my_data_frame
+```
+
+
+```{r}
+#Removed that are too highly correlated
+my_df1$GSPC.Open <- NULL
+my_df1$GSPC.High <- NULL
+my_df1$GSPC.Low <- NULL
+my_df1$GSPC.Close <- NULL
+my_df1$GSPC.Adjusted <- NULL
+my_df1$GSPC.Close.1 <- NULL
+my_df1$oscillator <- NULL
+my_df1$atr <- NULL
+my_df1$trueHigh <- NULL
+my_df1$trueLow <- NULL
+my_df1$dn <- NULL
+my_df1$mavg <- NULL
+my_df1$up <- NULL
+my_df1$pctB <- NULL
+my_df1$cci <- NULL
+my_df1$chaikin_ad <- NULL
+my_df1$cmo <- NULL
+my_df1$high <- NULL
+my_df1$mid <- NULL
+my_df1$low <- NULL
+my_df1$DEMA <- NULL
+my_df1$DEMA.1 <- NULL
+my_df1$dvi.mag <- NULL
+my_df1$dvi <- NULL
+my_df1$EMA.1 <- NULL
+my_df1$evwma10 <- NULL
+my_df1$evwma20 <- NULL
+my_df1$short.lag.3 <- NULL
+my_df1$short.lag.5 <- NULL
+my_df1$short.lag.8 <- NULL
+my_df1$short.lag.10 <- NULL
+my_df1$short.lag.12 <- NULL
+my_df1$short.lag.15 <- NULL
+my_df1$long.lag.30 <- NULL
+my_df1$long.lag.35 <- NULL
+my_df1$long.lag.40 <- NULL
+my_df1$long.lag.45 <- NULL
+my_df1$long.lag.50 <- NULL
+my_df1$long.lag.60 <- NULL
+my_df1$hma20 <- NULL
+my_df1$kst <- NULL
+my_df1$kst.1 <- NULL
+my_df1$signal.1 <- NULL
+my_df1$macd <- NULL
+my_df1$signal.2 <- NULL
+my_df1$macd.1 <- NULL
+my_df1$signal.3 <- NULL
+my_df1$GSPC.Close.2 <- NULL
+my_df1$dn.1 <- NULL
+my_df1$center <- NULL
+my_df1$up.1 <- NULL
+my_df1$rsi <- NULL
+my_df1$rsi.1 <- NULL
+my_df1$rsi.2 <- NULL
+my_df1$runmax10 <- NULL
+my_df1$runmean10 <- NULL
+my_df1$runmin10 <- NULL
+my_df1$runsd10 <- NULL
+my_df1$runsum10 <- NULL
+my_df1$sar <- NULL
+my_df1$SMA <- NULL
+my_df1$SMA.1 <- NULL
+my_df1$SMI <- NULL
+my_df1$signal.4 <- NULL
+my_df1$fastK <- NULL
+my_df1$fastD <- NULL
+my_df1$slowD <- NULL
+my_df1$fastK.1 <- NULL
+my_df1$fastD.1 <- NULL
+my_df1$slowD.1 <- NULL
+my_df1$fastD.2 <- NULL
+my_df1$SMI.1 <- NULL
+my_df1$signal.5 <- NULL
+my_df1$GSPC.Close.7 <- NULL
+my_df1$di <- NULL
+my_df1$di.1 <- NULL
+my_df1$TRIX <- NULL
+my_df1$TRIX.1 <- NULL
+my_df1$signal.7 <- NULL
+my_df1$vhf_hilo <- NULL
+my_df1$VWAP <- NULL
+my_df1$wildersum10 <- NULL
+my_df1$williams_ad <- NULL
+my_df1$wma10 <- NULL
+my_df1$GSPC.Close.9 <- NULL
+my_df1$zigzag10 <- NULL
+my_df1$zigzag20 <- NULL
+my_df1$zlema10 <- NULL
+my_df1$zlema20 <- NULL
+```
+
+
+```{r}
+head(my_df1)
+colnames(my_df1)
+
+my_df1 <- my_df1[, -3]
+my_df1 <- merge(my_df1, Daily_return, join = "left")
+```
+
+
+
+
+```{r}
+# Install useful packages
+install.packages("tidyverse")
+install.packages("dplyr")
+install.packages("leaps")
+install.packages("MASS")
+install.packages("dyn")
+install.packages("dynlm")
+install.packages("xts")
+install.packages("forecast")
+install.packages("lubridate")
+install.packages("broom")
+```
+
+```{r}
+# Load libraries
+library("tidyverse")
+library("dplyr")
+library("leaps")
+library("MASS")
+library("dyn")
+library("dynlm")
+library("xts")
+library("forecast")
+library("lubridate")
+library("broom")
+```
+
+#####################################
+## Split Data into Training & Test ##
+#####################################
+
+```{r}
+#select the first 80% of the data
+length(my_df1)
+dim(my_df1)
+spindex.end <- floor(0.8*nrow(my_df1)) 
+
+#assign the first 80% of the data to the train set
+spindex.train <- my_df1[1:spindex.end,] 
+
+#assign the most recent 20% to the test set
+spindex.test <- my_df1[(spindex.end+1):length(my_df1),] 
+```
+
+
+#########################
+## Stepwise Regression ##
+#########################
+
+```{r}
+# Perform backwards elimination of linear model
+FitAll <- lm(spindex.train$Con_daily_return ~ . , data = spindex.train)
+```
+
+
+```{r}
+# Reveiw model
+summary(FitAll)
+```
+
+
+```{r}
+# Run backward elimination
+step(FitAll, direction = "backward")
+
+```
+
+```{r}
+# Run forward selection
+FitStart <- lm(spindex.train$Con_daily_return ~ 1 , data = spindex.train)
+```
+
+
+```{r}
+# Review model
+step(FitStart, direction = "forward", scope = formula(FitAll))
+```
+
+
+```{r}
+# Run both forward and backward selection
+step(FitStart, direction = "both", scope = formula(FitAll))
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
