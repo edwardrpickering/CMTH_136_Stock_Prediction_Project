@@ -1,0 +1,2165 @@
+---
+title: "CMTH_136_Stock_Prediction_Project_v2"
+author: "Edward Pickering"
+date: "March 19, 2019"
+output: html_document
+---
+
+## PREPARATION ##
+
+```{r}
+#Load packages 
+library("quantmod")
+library("TTR")
+library("ggplot2")
+library("MASS")
+library("mlbench")
+library("caret")
+library("rpart")
+library("tidyr")
+library("FSelectorRcpp")
+library("doMC")
+library("glmnet")
+library("Boruta")
+library("FSelector")
+library("magrittr")
+```
+
+## DATA COLLECTION ##
+
+The sudy period is going to be the 5 year period from January 1, 2014 to March 30, 2019.  Extra data is collected and will be removed after data exploration and cleaning have been performed. 
+```{r}
+# Download SP500 Index Data
+getSymbols("^GSPC", src = "yahoo",
+           from = as.Date("2010-01-01"), to = as.Date("2019-03-29"))
+```
+SP500 is one of the best regarded stock indexes in the world and thus we would expect there to be complete data for the specified period
+
+```{r}
+# Check for missing data
+sum(is.na(GSPC))
+# 0 missing data.  Data for the project is secured. 
+```
+
+## DATA EXPLORATION
+```{r}
+# Count total number of rows
+nrow(GSPC)
+##  2324 total rows of data
+```
+
+
+```{r}
+# Display head and tail of data
+head(GSPC)
+tail(GSPC)
+#Rename column headings
+colnames(GSPC) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted" )
+```
+
+
+```{r}
+# Look at the class of data
+class(GSPC)
+```
+
+We can see that GSPC is a xts zoo object in R.  XTS is an object that allows for the storage of time-series data in R by indexing the time/date column. It is an extension to the S3 class from the zoo package hence the class showing as "xts" and "zoo".
+
+```{r}
+# Look at the structure and dimensions of the data
+str(GSPC)
+dim(GSPC)
+
+# Look at summary statistics for the data
+summary(GSPC)
+```
+
+## NOTES/DISCUSSION ##
+When one start to research stock market prediction.  One quickly learns that is is a field that gets so much attention that they already have accepted ways of managing and analysing data, namely with Auto Regression(AR) and Moving Average (MA) or AutoRegressive Moving Average (ARMA) and AutoRegressive Integrated Moving Average (ARIMA)  models.  The object of this project is to predict the stock market.  Therefore after running into some issues with analysis it was decided to start by running an ARIMA model to help learn some of the theory and give a base-line for the prediction model that will come later something to compare to. 
+
+## ARIMA ##
+
+"It is common in financial literature to use the closing price only when working with discrete-time fixed frequency data.  This holds for indicators, rule sets and performance metrics" (Conlan, 2016). In fact Yahoo Finance includes the Adjusted Close price (GSPC.Adjusted) of an asset that takes account of stock splits or dividends.  For ARIMA we need to the log of the Adjusted close price. This is because stocks price are based on returns and returns are based on percentages so using the log will capture that attribute. 
+
+```{r}
+#Create xts object that only contains date and Adjusted Price
+AP <- GSPC$Adjusted
+head(AP)
+plot(AP)
+```
+
+```{r}
+#Create xts object that contains date and logarithmic Adjusted Price
+LogAP <- log(AP)
+head(LogAP)
+plot(LogAP)
+```
+
+Split the data into training and test sets
+```{r}
+#Select the first 80% of the data
+dim(LogAP)
+LogAP.end <- floor(0.8*length(LogAP)) 
+
+#assign the first 80% of the data to the train set
+LogAP.train <- LogAP[1:LogAP.end,] 
+nrow(LogAP.train)
+#assign the most recent 20% to the test set
+LogAP.test <- LogAP[(LogAP.end+1):length(LogAP),] 
+nrow(LogAP.test)
+```
+
+# Stationarity
+Stationarity is a an assumption underlying many statistical procedures used in Time series analysis.  It means that mean and variance and standard deviation should be constant over time.  It is important for time series analysis becaus if the data cannot be see to have a constant mean, variance and standard deviation then there would be little confidence in making forecasts or predictions, rather the Efficient Market Hypothesis and the random walk theory that the stock market cannot be outperformed or predicted with any degree of accuracy.  
+
+When we look at the plots produced above we can see that the SP500 data does not appear to be stationary as the general tread looks to be going up.  There are a number of ways to test for stationarity.  The first is to perform autocorrelation and partial autocorrelation and look at the plots.
+```{r}
+#Perform autocorrelation
+acf(LogAP.train, lag.max = 100)
+pacf(LogAP.train, lag.max = 100)
+```
+With the autocorrelation we see that that there is a gradual consistent decrease in correlation as the lag time increases. The partial autocorrelation shows a large drop in correlation from time 0 to time 1 and none of the remaining correlations show are above or below the dotted blue significance line.  This suggests that the time-series is stationary and has a constant mean, variance and standard deviation, and that there hasn't been a shock to the time series that has had a lasting effect.   
+
+Stationarity can be tested for empirically by the Augmented Dickey-Fuller Test.
+```{r}
+library("tseries")
+#Run Agumented Dickey Fuller Test
+adf.test(LogAP.train)
+```
+
+The Augmented Dickey-Fuller test has is -2.9554 which is less negative than the tabulated critical values for a sample of greater than 500 at the 95% confidence interval of -3.41 with trend but more than -2.86 without trend.  We cannot reject the null hypothesis of non-stationaity.  To confirm stationarity we can take the differenced time series and run the Augmented Dickey-Fuller test again.
+
+```{r}
+#Difference the data.
+diffAP.train <- diff(LogAP.train, na.pad = F)
+
+# Run Augmented Dickey-Fuller Test again
+adf.test(diffAP.train)
+```
+
+Now the Augmented Dickey-Fuller statistic is -12.304 which is more negative than either of the comparison statistics and therefore the null hypothesis of non-stationarity can be rejected. 
+
+Therefore we are now good to run the Autoregression model.  To speed the process an autoregression an auto ARIMA call is going to be made so that the author does not manually have to choose the number of autoregressors, the order of the moving average model and the number of differences.  Auto ARIMA will vary the inputs given to each of the attributes in the model and choose the best one. 
+
+```{r}
+library("forecast")
+AP.arima <- ts(LogAP.train, start = c(2010, 01), frequency = 252)
+class(AP.arima)
+head(AP.arima)
+fit.AP <- auto.arima(AP.arima)
+plot(AP.arima,   type = "l",
+     xlab = "Date",
+     ylab = "Closing Value",
+     main = "S&P 500 Adjusted Closing Price"
+     )
+exp(LogAP.train)
+```
+
+
+
+#Arima Forecasted Values
+```{r}
+nrow(LogAP.test)
+#465
+forecastAP <- forecast(fit.AP, h = 465)
+plot(forecastAP)
+head(forecastAP)
+```
+The final model selected by auto ARIMA is (0, 1, 1) with drift. 
+
+
+```{r}
+#Extract Arima Forecast Values
+AP.forecast.extracted <- as.numeric(forecastAP$mean)
+AP.final.forecast.values <- exp(AP.forecast.extracted)
+AP.final.forecast.values
+```
+
+Now we need to test the forecast against the actual recorded prices in the test set. 
+```{r}
+df <- data.frame(exp(LogAP.test), AP.final.forecast.values)
+head(df)
+percent_error <- ((df$Adjusted - df$AP.final.forecast.values) / (df$Adjusted))
+mean(percent_error)
+```
+Shows an average of approximately 1% deviation on average between the forecasted and actual prices. 
+
+We now need to test if the the residuals of the autocorrelations are different from Zero and will use the Ljung-box test to do so.  First we will look at the plot of the residuals in a histogram. 
+
+```{r}
+hist(fit.AP$residuals)
+```
+The histogram suggests that the residuals may not be normal — the left tail seems a little too long.
+
+
+```{r}
+Box.test(fit.AP$residuals, lag=1, type = "Ljung-Box")
+Box.test(fit.AP$residuals, lag=5, type = "Ljung-Box")
+Box.test(fit.AP$residuals, lag=10, type = "Ljung-Box")
+```
+Not all the p-values are above 0.05, thus we cannot reject the null hypothesis that the residuals are correlated. Therefore, forecasts from this method will probably be quite good, but predictions that are based on a normal distribution may be innacurate. 
+
+
+
+## DATA EXPLORATION CONTINUED ##
+
+"Although the actual price movement may also be useful, it is in many cases helpful to look at logarithmic prices.  Exponential development - which is the result of cumulated growth over time - is translated into a linear trend of the logarithmic prices and shows as a straight line trend when you graph the logarithmic prices". (Feuct, 2018).  "Most traders and charting programs us the logarithmic scale" (Investopedia, 2018) and therefore this work will also use the logarithmic values. 
+
+For plotting the data it will be easier if it is transformed into a data.frame
+
+```{r}
+# save the data in a data.frame format
+sp500.df <- data.frame(
+  index(GSPC),
+  coredata(GSPC),
+  stringsAsFactors=FALSE
+)
+```
+
+```{r}
+# display head of new data frame
+head(sp500.df)
+colnames(sp500.df) <- c("Date", "Open", "High", "Low", "Close", "Volume", "Adjusted" )
+```
+
+For viewing the plots it is useful to have the logarithmic scale overlaid with the actual prices.
+```{r}
+# Plot the Open prices on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$Open,
+     type = "l",
+     xlab = "Date",
+     ylab = "Opening Value",
+     log = "y",
+     main = "S&P 500 Opening Values Since 2010(Logarithmic Scale)"
+)
+```
+
+
+```{r}
+#Plot Open price density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$Open)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$Open), sd = sd(sp500.df$Open)))
+```
+
+```{r}
+# Plot the High prices on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$High,
+     type = "l",
+     xlab = "Date",
+     ylab = "High Value",
+     log = "y",
+     main = "S&P 500 High Values Since 2010(Logarithmic Scale)"
+)
+```
+```{r}
+#Plot High price density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$High)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$High), sd = sd(sp500.df$High)))
+```
+
+
+```{r}
+# Plot the Low prices on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$Low,
+     type = "l",
+     xlab = "Date",
+     ylab = "Low Value",
+     log = "y",
+     main = "S&P 500 Low Values Since 2010(Logarithmic Scale)"
+)
+```
+```{r}
+#Plot Low price density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$Low)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$Low), sd = sd(sp500.df$Low)))
+```
+
+```{r}
+# Plot the Close prices on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$Close,
+     type = "l",
+     xlab = "Date",
+     ylab = "Close Value",
+     log = "y",
+     main = "S&P 500 Close Values Since 2010(Logarithmic Scale)"
+)
+```
+```{r}
+#Plot Close price density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$Close)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$Close), sd = sd(sp500.df$Close)))
+```
+
+
+```{r}
+# Plot the Trading Volume on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$Volume,
+     type = "l",
+     xlab = "Date",
+     ylab = "Volume",
+     log = "y",
+     main = "S&P 500 Volumes Traded Since 2010(Logarithmic Scale)"
+)
+```
+```{r}
+#Plot Volume density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$Volume)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$Volume), sd = sd(sp500.df$Volume)))
+```
+
+
+```{r}
+# Plot the close Adjusted prices on a logarithmic scale
+plot(x = sp500.df$Date,
+     y = sp500.df$High,
+     type = "l",
+     xlab = "Date",
+     ylab = "Close Adjusted Value",
+     log = "y",
+     main = "S&P 500 Close Adjusted Values Since 2010(Logarithmic Scale)"
+)
+```
+```{r}
+#Plot Close Adjusted price density overlaid with the normal distribution
+ggplot(sp500.df, aes(x=sp500.df$Adjusted)) + geom_histogram(bins = 50, aes(y = ..density..), col = "red", fill = "pink") + stat_function(fun = dnorm, lwd = 2, col = 'blue', args = list(mean = mean(sp500.df$Adjusted), sd = sd(sp500.df$Adjusted)))
+```
+
+
+
+
+
+
+```{r}
+#Duplicate GSPC data on logarithmic scale
+GSPC.log <- log(GSPC)
+head(GSPC.log)
+```
+
+The return from a price change can be viewed as either a discrete return or as a continuous logarithmic return.  The continuous logarithmic return is favoured in finance as it describes continuously compounded returns (Feuct, 2018).  The other reason for using the logarithmic scale for calculating returns is that the discrete return can never have the desired property of following a Gaussian normal distribution.  If we use the log continuous returns we can demonstrate that the data approximates the normal distribution. 
+
+```{r}
+# Continuous Adjusted Close Return
+GSPC$Con_daily_return <- diff.xts(log(GSPC$Adjusted))
+```
+
+```{r}
+#Check head of new xts.object
+head(GSPC)
+nrow(GSPC)
+```
+
+
+```{r}
+# Remove NAs created by calcualtion of daily return
+GSPC <- na.exclude(GSPC)
+```
+
+```{r}
+# Recheck head 
+head(GSPC)
+```
+
+```{r}
+# Plot the continuous daily returns on a logarithmic scale
+plot(x = index(GSPC),
+     y = GSPC$Con_daily_return,
+     type = "l",
+     xlab = "Date",
+     ylab = "Continuous Daily Returns",
+     main = "S&P 500 Continuous Daily Returns Since 2010(Logarithmic Scale)"
+)
+```
+From the above plot we can see the that logarithmic returns have a constant mean, variance, and standard deviation and therefore are stationary and can be used for analysis.
+
+```{r}
+#Boxplot Continuous Daily Returns to look for outliers
+library("PerformanceAnalytics")
+chart.Boxplot(GSPC$Con_daily_return)
+```
+
+The boxplot is negatively skewed with a considerable number of preponderance of outliers and one extreme value on the left.  These will need further investigation.
+
+```{r}
+#Plot histogram of density
+chart.Histogram(GSPC$Con_daily_return[,1,drop=F], main = "Density", breaks=50, methods = c("add.density", "add.normal"))
+```
+
+
+```{r}
+#Plot skew and kurtosis
+chart.Histogram(GSPC$Con_daily_return[,1,drop=F], main = "Skew and Kurt", methods = c("add.centered", "add.rug"))
+```
+
+The boxplot identified a number of outliers in the current data.  The histogram of density with the normal distribution overlaid and the density confirm what was noted earlier about the approximation of the normal distribution with a preponderance of scores around the mean and longer tails.  The skew and kurtosis plot show no skew and and confirm a leptokuric distribution.  This means there is a preponderance of scores around the mean and that is caused by occasional extreme outliers.  This noisy distribution is part of what makes predicting the stock market such a challenge and keeps people investing/trading. The large occassional market move that cause the outliers is an integral part of the puzzle for stock market prediction.  Replacing some of the outliers would be an option but removing them would not make sense due the relation of time-series data.  For these reasons it has been decided to move forward with the remainder of the analysis without treating outliers at the moment. 
+
+
+## DERIVED DATA ##
+
+In 2003, Kim used 12 technical indicators to train his Support Vector Machine (SVM) to predict stock price movement.  The www.stockcharts.com website details 55 different Overlays and Technical Indicators that investors can use to make their predictions.    The TTR package in R provides tools to calculate up to 42 technical indicators from stock data.  The remainder of this section will calculate the relevant indicators for the current data, default values will be used throughout.  
+
+```{r}
+# Create copy of GSPC with logarithamic values for Open, High, Low, Close, Volume, Adjusted variables. 
+GSPC.log <- subset(GSPC, select = c("Open", "High", "Low", "Close", "Volume", "Adjusted"))
+head(GSPC.log, n = 10)
+GSPC.log <- log(GSPC.log)
+
+#Add continuous daily returns to GSPC.log
+GSPC.log$Con_daily_return <- GSPC$Con_daily_return
+```
+
+## STATIONARITY TESTING ##
+
+When perfroming the the ARIMA earlier the Adjusted Close price was tested for stationarity before hand.  Prior calculating the Technical indicators we will test for stationarity in the remaing variables (Open, High, Low, Close, Volume).  Con_daily_return does not need to be checked as it has all ready been differenced and plotted and shown to have a constant mean, variance and standard deviation. 
+
+
+#Test for serial correlation on OPEN Values
+```{r}
+#Perform autocorrelation on Open values
+acf(GSPC.log$Open, lag.max = 100)
+pacf(GSPC.log$Open, lag.max = 100)
+```
+
+
+```{r}
+#Run Agumented Dickey Fuller Test
+adf.test(GSPC.log$Open)
+```
+
+The Augmented Dickey-Fuller test has is -3.38 which is less negative than the tabulated critical value for a sample of greater than 500 at the 95% confidence interval of -3.41 with trend which means we cannot reject the null hypothesis of non-stationaity.  To confirm stationarity we can take the differenced time series and run the Augmented Dickey-Fuller test again.
+
+```{r}
+#Difference the data.
+diff.open <- diff(GSPC.log$Open, na.pad = F)
+
+# Run Augmented Dickey-Fuller Test again
+adf.test(diff.open)
+```
+Now the Augmented Dickey-Fuller statistic is -14.232 which is more negative than either of the comparison statistics and therefore the null hypothesis of non-stationarity can be rejected. 
+
+#Test for serial correlation on High values
+```{r}
+#Perform autocorrelation on High values
+acf(GSPC.log$High, lag.max = 100)
+pacf(GSPC.log$High, lag.max = 100)
+```
+
+
+```{r}
+#Run Agumented Dickey Fuller Test
+adf.test(GSPC.log$High)
+```
+
+The Augmented Dickey-Fuller test has is -3.202 which is less negative than the tabulated critical values for a sample of greater than 500 at the 95% confidence interval of -3.41 with trend which means we cannot reject the null hypothesis of non-stationaity.  To confirm stationarity we can take the differenced time series and run the Augmented Dickey-Fuller test again.
+
+```{r}
+#Difference the data.
+diff.high <- diff(GSPC.log$High, na.pad = F)
+
+# Run Augmented Dickey-Fuller Test again
+adf.test(diff.high)
+```
+Now the Augmented Dickey-Fuller statistic is -13.56 which is more negative than either of the comparison statistics and therefore the null hypothesis of non-stationarity can be rejected. 
+
+#Test for serial correlation on Low values
+```{r}
+#Perform autocorrelation on Low values
+acf(GSPC.log$Low, lag.max = 100)
+pacf(GSPC.log$Low, lag.max = 100)
+```
+
+
+```{r}
+#Run Agumented Dickey Fuller Test
+adf.test(GSPC.log$Low)
+```
+
+The Augmented Dickey-Fuller test has is -3.4591 which is more negative than the tabulated critical values for a sample of greater than 500 at the 95% confidence interval of -3.41 with trend and -2.86 without trend which means we can reject the null hypothesis of non-stationaity.  
+
+#Test for serial correlation on Close values
+```{r}
+#Perform autocorrelation on Close values
+acf(GSPC.log$Close, lag.max = 100)
+pacf(GSPC.log$Close, lag.max = 100)
+```
+
+
+```{r}
+#Run Agumented Dickey Fuller Test
+adf.test(GSPC.log$Close)
+```
+
+The Augmented Dickey-Fuller test has is -3.3552 which is less negative than the tabulated critical values for a sample of greater than 500 at the 95% confidence interval of -3.41 with trend and -2.86 without trend which means we can reject the null hypothesis of non-stationaity.  
+
+
+#Test for serial correlation on Volume values
+```{r}
+#Perform autocorrelation on Volume values
+acf(GSPC.log$Volume, lag.max = 100)
+pacf(GSPC.log$Volume, lag.max = 100)
+```
+
+
+```{r}
+#Run Agumented Dickey Fuller Test
+adf.test(GSPC.log$Volume)
+```
+
+The Augmented Dickey-Fuller test has is -8.02 which is more negative than the tabulated critical values for a sample greater than 500 at the 95% confidence interval of -3.41 with trend and -2.86 without trend which means we can reject the null hypothesis of non-stationaity.  
+
+## CALCULATE TECHNICAL INDICATORS ##
+
+# 1.  Calculate Split and dividend adjusted ratios - not necessary as quantmod/yahoo provide adjusted close
+# values
+
+
+```{r}
+# 2.  Calculate Welles Wilder's Directional Movement Index
+wwdmi <- ADX(HLC(GSPC.log))
+summary(wwdmi)
+head(wwdmi)
+class(wwdmi)
+
+# create xts object with complette cases
+wwdmi2 <- na.exclude(wwdmi)
+
+#Run Agumented Dickey Fuller Test
+adf.test(wwdmi2$DIp)
+adf.test(wwdmi2$DIn)
+adf.test(wwdmi2$DX)
+adf.test(wwdmi2$ADX)
+```
+
+```{r}
+# 3.  Calculate Aroon
+aroon20 <- aroon(c(GSPC.log$High, GSPC.log$Low), n = 20)
+summary(aroon20)
+
+aroon20.2 <- na.exclude(aroon20)
+adf.test(aroon20.2$aroonUp)
+adf.test(aroon20.2$aroonDn)
+adf.test(aroon20.2$oscillator)
+```
+
+
+```{r}
+# 4. Calculate True Range/Average True Range
+atr14 <- ATR(HLC(GSPC.log))
+summary(atr14)
+
+#Perform Dickey-Fuller Test
+atr14.2 <- na.exclude(atr14)
+adf.test(atr14.2$tr)
+adf.test(atr14.2$atr)
+adf.test(atr14.2$trueHigh)
+adf.test(atr14.2$trueLow)
+
+atr14.3 <- atr14.2
+
+#Difference trueHigh and trueLow
+atr14.3$trueHigh <- diff(atr14.3$trueHigh)
+atr14.3$trueLow <- diff(atr14.3$trueLow)
+
+#Remove NAs 
+atr14.3 <- na.exclude(atr14.3)
+
+#Perform Dickey-Fuller Test
+adf.test(atr14.3$trueHigh)
+adf.test(atr14.3$trueLow)
+#atr14.3 to be used in analysis
+```
+
+```{r}
+# 5. Calculate Bollinger Bands High, Low, Close
+bbands20 <- BBands(HLC(GSPC.log))
+summary(bbands20)
+
+#Perform Dickey-Fuller Test
+bbands20.2 <- na.exclude(bbands20)
+adf.test(bbands20.2$dn)
+adf.test(bbands20.2$mavg)
+adf.test(bbands20.2$up)
+adf.test(bbands20.2$pctB)
+
+bbands20.3 <- bbands20.2
+
+#Difference variables showing autocorrelation
+bbands20.3$dn <- lag(diff(bbands20.3$dn), -1)
+bbands20.3$mavg <- lag(diff(bbands20.3$mavg), -1)
+bbands20.3$up <- lag(diff(bbands20.3$up), -1)
+
+#Perform Dickey-Fuller Test
+bbands20.3 <- na.exclude(bbands20.3)
+adf.test(bbands20.3$dn)
+adf.test(bbands20.3$mavg)
+adf.test(bbands20.3$up)
+```
+
+
+
+
+```{r}
+# 6. Calculate Commodity Channel Index(CCI)
+cci20 <- CCI(HLC(GSPC.log))
+summary(cci20)
+
+cci20.2 <- na.exclude(cci20)
+
+adf.test(cci20.2$cci)
+```
+
+
+```{r}
+# 7. Calculate Chaikin Accumuluation / Distribution
+chaikin_ad <- chaikinAD(HLC(GSPC.log), GSPC.log$Volume)
+summary(chaikin_ad)
+
+#Perform Dickey-Fuller Test
+chaikin_ad.2 <- na.exclude(chaikin_ad)
+adf.test(chaikin_ad.2)
+
+#Difference variable as it shows autocorrelation
+chaikin_ad.3 <- chaikin_ad.2
+chaikin_ad.3 <- diff(chaikin_ad.3)
+
+#Perform Dickey-Fuller Test
+chaikin_ad.3 <- na.exclude(chaikin_ad.3)
+adf.test(chaikin_ad.3)
+#chaikin_ad.2 to be used in Analysis
+```
+
+```{r}
+# 8.  Calculate Chainkin Volatility
+chaikin_vol <- chaikinVolatility(HLC(GSPC.log))
+summary(chaikin_vol)
+
+#Perform Dickey-Fuller Test
+chaikin_vol.2 <- na.exclude(chaikin_vol)
+adf.test(chaikin_vol.2$EMA)
+```
+
+```{r}
+# 9. Calculate Close Location Value
+close_lv <- CLV(HLC(GSPC.log))
+summary(close_lv)
+
+#Perform Dickey-Fuller test
+close_lv.2 <- na.exclude(close_lv)
+adf.test(close_lv.2)
+```
+
+```{r}
+# 10. Calculate Chaikin Money Flow
+chaikin_mf <- CMF(HLC(GSPC.log), GSPC.log$Volume)
+summary(chaikin_mf)
+
+#Perform Dickey-Fuller Test
+chaikin_mf.2 <- na.exclude(chaikin_mf)
+adf.test(chaikin_mf.2)
+```
+
+```{r}
+# 11. Calculate Chande Momentum Oscillator
+cmo <- CMO(GSPC.log$Close)
+summary(cmo)
+
+#Perform Dickey-Fuller teset
+cmo.2 <- na.exclude(cmo)
+adf.test(cmo.2)
+```
+
+```{r}
+# 12. Calculate Donchian Channel
+dc <- DonchianChannel(GSPC.log$High, GSPC.log$Low)
+summary(dc)
+
+#Perfrom Dickey-Fuller Test
+dc.2 <- na.exclude(dc)
+adf.test(dc.2$high)
+adf.test(dc.2$mid)
+adf.test(dc.2$low)
+
+#Difference variables showing autocorrelation
+dc.3 <- dc.2
+dc.3$high <- diff(dc.3$high)
+dc.3$mid <- diff(dc.3$mid)
+dc.3$low <- diff(dc.3$low)
+
+#Perform Dickey-Fuller Test
+dc.3 <- na.exclude(dc.3)
+adf.test(dc.3$high)
+adf.test(dc.3$mid)
+adf.test(dc.3$low)
+#dc.3 to be used in analysis
+```
+
+```{r}
+# 13. Calculate Price De-Trended Price Oscillator
+price_dpo <- DPO(GSPC.log$Close)
+summary(price_dpo)
+
+#Perform Dickey-Fuller Test
+price_dpo.2 <- na.exclude(price_dpo)
+adf.test(price_dpo.2$Close)
+```
+
+```{r}
+# 14. Calculate Volume De-Trended Price Oscillator
+volume_dpo <- DPO(GSPC.log$Volume)
+summary(volume_dpo)
+
+volume_dpo.2 <- na.exclude(volume_dpo)
+adf.test(volume_dpo.2$Volume)
+```
+
+```{r}
+# 15.  Calculate DV Intermediate Oscillator
+dvi <- DVI(GSPC.log$Close)
+summary(dvi)
+
+#Perform Dickey-Fuller Test
+dvi.2 <- na.exclude(dvi)
+adf.test(dvi.2$dvi.mag)
+adf.test(dvi.2$dvi.str)
+adf.test(dvi.2$dvi)
+```
+
+
+```{r}
+# 16. Calculate Arms' Ease of Movement Value
+emv <- EMV(HLC(GSPC.log), GSPC.log$Volume)
+summary(emv)
+
+#Perfrom Dickey-Fuller Test
+emv.2 <- na.exclude(emv)
+adf.test(emv.2$emv)
+adf.test(emv.2$maEMV)
+```
+
+
+```{r}
+# 17. Calculate Guppy Mul]tiple Moving Averages
+gmma <- GMMA(GSPC.log$Close)
+summary(gmma)
+
+#Perfrom Dickey-Fuller Test
+gmma.2 <- na.exclude(gmma)
+adf.test(gmma.2$`short lag 3`)
+adf.test(gmma.2$`short lag 5`)
+adf.test(gmma.2$`short lag 8`)
+adf.test(gmma.2$`short lag 10`)
+adf.test(gmma.2$`short lag 12`)
+adf.test(gmma.2$`short lag 15`)
+adf.test(gmma.2$`long lag 30`)
+adf.test(gmma.2$`long lag 35`)
+adf.test(gmma.2$`long lag 40`)
+adf.test(gmma.2$`long lag 45`)
+adf.test(gmma.2$`long lag 50`)
+adf.test(gmma.2$`long lag 60`)
+
+#Difference variables showing serial correlation
+gmma.3 <- gmma.2
+gmma.3$`short lag 3` <- diff(gmma.3$`short lag 3`)
+gmma.3$`short lag 5` <- diff(gmma.3$`short lag 5`)
+gmma.3$`short lag 8` <- diff(gmma.3$`short lag 8`)
+gmma.3$`short lag 10` <- diff(gmma.3$`short lag 10`)
+gmma.3$`short lag 12` <- diff(gmma.3$`short lag 12`)
+gmma.3$`short lag 15` <- diff(gmma.3$`short lag 15`)
+gmma.3$`long lag 30` <- diff(gmma.3$`long lag 30`)
+gmma.3$`long lag 35` <- diff(gmma.3$`long lag 35`)
+gmma.3$`long lag 40` <- diff(gmma.3$`long lag 40`)
+gmma.3$`long lag 45` <- diff(gmma.3$`long lag 45`)
+gmma.3$`long lag 50` <- diff(gmma.3$`long lag 50`)
+gmma.3$`long lag 60` <- diff(gmma.3$`long lag 60`)
+
+#Perform Dickey-Fuller Test
+gmma.3 <- na.exclude(gmma.3)
+adf.test(gmma.3$`short lag 3`)
+adf.test(gmma.3$`short lag 5`)
+adf.test(gmma.3$`short lag 8`)
+adf.test(gmma.3$`short lag 10`)
+adf.test(gmma.3$`short lag 12`)
+adf.test(gmma.3$`short lag 15`)
+adf.test(gmma.3$`long lag 30`)
+adf.test(gmma.3$`long lag 35`)
+adf.test(gmma.3$`long lag 40`)
+adf.test(gmma.3$`long lag 45`)
+adf.test(gmma.3$`long lag 50`)
+adf.test(gmma.3$`long lag 60`)
+#gmma.3 to be used in analysis
+```
+
+
+```{r}
+# 18. Calculate Know Sure Thing
+kst <- KST(GSPC.log$Close)
+summary(kst)
+
+#Perform Dickey-Fuller Test
+kst.2 <- na.exclude(kst)
+adf.test(kst.2$kst)
+adf.test(kst.2$signal)
+```
+
+
+```{r}
+# 19. Calculate Know Sure Thing with 4 Moving Averages
+kst4ma <- KST(GSPC.log$Close,
+              maType = list(list(SMA), list(EMA), list(DEMA), list(WMA)))
+summary(kst4ma)
+
+#Perform Dickey-Fuller Test
+kst4ma.2 <- na.exclude(kst4ma)
+adf.test(kst4ma.2$kst)
+adf.test(kst4ma.2$signal)
+```
+
+
+```{r}
+# 20. Calculate MACD Oscillator
+macd <- MACD(GSPC.log$Close, 12, 26, 9, maType = "EMA")
+summary(macd)
+
+#Perform Dickey-Fuller Test
+macd.2 <- na.exclude(macd)
+adf.test(macd.2$macd)
+adf.test(macd.2$signal)
+```
+
+
+```{r}
+# 21. Calculate MACD Oscillator with 3 Moving Averages
+macd2 <- MACD(GSPC.log$Close, 12, 26, 9,
+              maType = list(list(SMA), list(EMA, wilder = TRUE), list(SMA)))
+summary(macd2)
+
+#Perform Dickey-Fuller Test
+macd2.2 <- na.exclude(macd2)
+adf.test(macd2.2$macd)
+adf.test(macd2.2$signal)
+```
+
+
+```{r}
+# 22. Calculate Money Flow Index
+mfi <- MFI(HLC(GSPC.log), GSPC.log$Volume)
+summary(mfi)
+
+#Perfrom Dickey-Fuller Test
+mfi.2 <- na.exclude(mfi)
+adf.test(mfi.2$mfi)
+```
+
+```{r}
+# 23. Calculate On Balance Volume
+obv <- OBV(GSPC.log$Close, GSPC.log$Volume)
+summary(obv)
+
+#Perfrom Dickey-Fuller Test
+obv.2 <- na.exclude(obv)
+adf.test(obv.2$obv)
+
+#Difference as it is showing serial correlation
+obv.3 <- obv.2
+obv.3$obv <- diff(obv.3$obv)
+obv.3 <- na.exclude(obv.3)
+
+#Perform Dickey-Fuller Test
+adf.test(obv.3$obv)
+#obv.3 to be used in analysis
+```
+
+
+```{r}
+# 24. Calcualte Volatility Price Bands
+pbands <- PBands(GSPC.log$Close)
+summary(pbands)
+
+#Perform Dickey-Fuller Test
+pbands.2 <- na.exclude(pbands)
+adf.test(pbands.2$dn)
+adf.test(pbands.2$center)
+adf.test(pbands.2$up)         
+
+#Difference variables showing autocorrelation
+pbands.3 <- pbands.2
+pbands.3$dn <- diff(pbands.3$dn)
+pbands.3$center <- diff(pbands.3$center)
+pbands.3$up <- diff(pbands.3$up)
+
+#Perform Dickey-Fuller Test
+pbands.3 <- na.exclude(pbands.3)
+adf.test(pbands.3$dn)
+adf.test(pbands.3$center)
+adf.test(pbands.3$up)
+#pbands.3 to be used in analysis
+```
+
+
+```{r}
+# 25. Calculate Rate of Change
+roc <- ROC(GSPC.log$Close)
+summary(roc)
+
+#Perform Dickey-Fuller Test
+roc.2 <- na.exclude(roc)
+adf.test(roc.2$Close)
+```
+
+
+```{r}
+# 26. Calculate Momentum
+mom <- momentum(GSPC.log$Close)
+summary(mom)
+
+#Perform Dickey-Fuller Test
+mom.2 <- na.exclude(mom)
+adf.test(mom.2$Close)
+```
+
+
+```{r}
+# 27. Calculate RSI
+rsi <- RSI(GSPC.log$Close)
+summary(rsi)
+
+#Perfrom Dickey-Fuller Test
+rsi.2 <- na.exclude(rsi)
+adf.test(rsi.2$rsi)
+```
+
+
+```{r}
+# 28. Calculate RSI of one Moving Average Type for both Moving Averages
+rsima1 <- RSI(GSPC.log$Close, n = 14, maType = "WMA", wts = GSPC.log$Volume)
+summary(rsima1)
+
+#Perform Dickey-Fuller Test
+rsima1.2 <- na.exclude(rsima1)
+adf.test(rsima1.2$rsi)
+```
+
+
+```{r}
+# 29.  Calculate RSI of two different Moving averages for both moving averages
+rsima2 <- RSI(GSPC.log$Close, n = 14, maType = list(maUp = list(EMA, ratio = 1/5),
+                                                     maDown = list(WMA, wts = 1:10)))
+summary(rsima2)
+
+#Perform Dickey-Fuller Test
+rsima2.2 <- na.exclude(rsima2)
+adf.test(rsima2.2)
+```
+
+
+```{r}
+# 30. Calculate Percent Rank over a Moving Window
+percent_rank <- runPercentRank(GSPC.log$Close, n = 125, cumulative = FALSE, exact.multiplier = 0.5)
+summary(percent_rank)
+
+#Perform Dickey-Fuller Test
+percent_rank.2 <- na.exclude(percent_rank)
+adf.test(percent_rank.2)
+```
+
+
+```{r}
+# 31. Calculate Sum over a 10 day rolling window
+runsum10 <- runSum(GSPC.log$Close)
+summary(runsum10)
+
+# Perform Dickey-Fuller Test
+runsum10.2 <- na.exclude(runsum10)
+adf.test(runsum10.2)
+
+#Difference as showing signs of autocorrelation
+runsum10.3 <- runsum10.2
+runsum10.3 <- diff(runsum10.3)
+
+#Perform Dickey_Fuller Test
+runsum10.3 <- na.exclude(runsum10.3)
+adf.test(runsum10.3)
+#runsum10.3 to be used in analysis
+```
+
+
+```{r}
+# 32. Calculate Minimun over a 10 day rolling window
+runmin10 <- runMin(GSPC.log$Close)
+summary(runmin10)
+
+#Perform Dickey-Fuller Test
+runmin10.2 <- na.exclude(runmin10)
+adf.test(runmin10.2)
+
+#Difference due to autocorrelation
+runmin10.3 <- runmin10.2
+runmin10.3 <- diff(runmin10.3)
+
+#Perform Dickey-Fuller Test
+runmin10.3 <- na.exclude(runmin10.3)
+adf.test(runmin10.3)
+```
+
+
+```{r}
+# 33. Calculate Maximum over a 10 day rolling window
+runmax10 <- runMax(GSPC.log$Close)
+summary(runmax10)
+
+# Perform Dickey-Fuller Test
+runmax10.2 <- na.exclude(runmax10)
+adf.test(runmax10.2)
+
+#Difference due to autocorrelation
+runmax10.3 <- runmax10.2
+runmax10.3 <- diff(runmax10.3)
+
+#Perform Dickey-Fuller Test
+runmax10.3 <- na.exclude(runmax10.3)
+adf.test(runmax10.3)
+#runmax10.3 to be used in analysis
+```
+
+
+```{r}
+# 34. Calculate Mean over a 10 day rolling window
+runmean10 <- runMean(GSPC.log$Close)
+summary(runmean10)
+
+#Perform Dickey_Fuller TEst
+runmean10.2 <- na.exclude(runmean10)
+adf.test(runmean10.2)
+
+#Difference due to autocorrelation
+runmean10.3 <- runmean10.2
+runmean10.3 <- diff(runmean10.3)
+
+#Perform Dickey-Fuller Test
+runmean10.3 <- na.exclude(runmean10.3)
+adf.test(runmean10.3)
+#runmean10.3 to be used in analysis
+```
+
+
+```{r}
+#35. Calculate Median over a 10 day rolling window
+runmedian10 <- runMedian(GSPC.log$Close)
+summary(runmedian10)
+
+# Perform Dickey-Fuller Test
+runmedian10.2 <- na.exclude(runmedian10)
+adf.test(runmedian10.2)
+
+#Difference due to serial correlation
+runmedian10.3 <- runmedian10.2
+runmedian10.3 <- diff(runmedian10.3)
+
+#Perform Dickey-Fuller Test
+runmedian10.3 <- na.exclude(runmedian10.3)
+adf.test(runmedian10.3)
+#runmedian10.3 to be used in analysis
+```
+
+
+```{r}
+#36. Calculate Standard Deviation over a 10 day rolling window
+runsd10 <- runSD(GSPC.log$Close) 
+summary(runsd10)
+
+#Perform Dickey-Fuller Test
+runsd10.2 <- na.exclude(runsd10)
+adf.test(runsd10.2)
+```
+
+
+```{r}
+#37. Calculate mean/median deviations over a 10 day rolling window
+runmad10 <- runMAD(GSPC.log$Close)
+summary(runmad10)
+
+#Perform Dickey_Fuller Test
+runmad10.2 <- na.exclude(runmad10)
+adf.test(runmad10.2)
+```
+
+
+```{r}
+#38. Calcualte weight sum over a 10 day rolling window
+wildersum10 <- wilderSum(GSPC.log$Close)
+summary(wildersum10)
+
+wildersum10.2 <- na.exclude(wildersum10)
+adf.test(wildersum10.2)
+
+#Difference due to autocorrelation
+wildersum10.3 <- wildersum10.2
+wildersum10.3 <- diff(wildersum10.3)
+
+#Perform Dickey_Fuller Test
+wildersum10.3 <- na.exclude(wildersum10.3)
+adf.test(wildersum10.3)
+```
+
+
+```{r}
+#39. Calculate Parabolic Stop and Reverse
+sar <- SAR(HLC(GSPC.log))
+summary(sar)
+
+#Perform Dickey_Fuller Test
+sar.2 <- na.exclude(sar)
+adf.test(sar.2)
+
+#difference due to autocorrelation
+sar.3 <- sar.2
+sar.3 <- diff(sar.3)
+
+#Perform Dickey_Fuller test
+sar.3 <- na.exclude(sar.3)
+adf.test(sar.3)
+```
+
+
+```{r}
+# 40. Calculate simple 10 day moving average
+sma10 <- SMA(GSPC.log$Close)
+summary(sma10)
+
+#Perform Dickey-Fuller Test
+sma10.2 <- na.exclude(sma10)
+adf.test(sma10.2)
+
+#Difference due to autocorrelation
+sma10.3 <- sma10.2
+sma10.3 <- diff(sma10.3)
+
+#Perform Dickey-Fuller Test
+sma10.3 <- na.exclude(sma10.3)
+adf.test(sma10.3)
+#sma10.3 to be used in analysis
+```
+
+
+```{r}
+# 41. Calculate exponentially weighted 10 day average
+ema10 <- EMA(GSPC.log$Close) 
+summary(ema10)
+
+#Perform Dickey-Fuller test
+ema10.2 <- na.exclude(ema10)
+adf.test(ema10.2)
+
+#Difference due to auto-correlation
+ema10.3 <- ema10.2
+ema10.3 <- diff(ema10.3)
+
+#Perform Dickey-Fuller Test
+ema10.3 <- na.exclude(ema10.3)
+adf.test(ema10.3)
+#ema10.3 to be used in analysis
+```
+
+
+```{r}
+# 42. Calcualte double exponential weighted 10 day moving average
+dema10 <- DEMA(GSPC.log$Close)
+summary(dema10)
+
+# perform dickey-fuller test
+dema10.2 <- na.exclude(dema10)
+adf.test(dema10.2)
+
+#Difference due to autocorrelation
+dema10.3 <- dema10.2
+dema10.3 <- diff(dema10.3)
+
+#Perform dickey-fuller test
+dema10.3 <- na.exclude(dema10.3)
+adf.test(dema10.3)
+```
+
+
+```{r}
+# 43. Calculate weighted 10 day moving average
+wma10 <- WMA(GSPC.log$Close)
+summary(wma10)
+
+#Perform Dickey-Fuller Test
+wma10.2 <- na.exclude(wma10)
+adf.test(wma10.2)
+
+#Difference due to auto-correlation
+wma10.3 <- wma10.2
+wma10.3 <- diff(wma10.3)
+
+#Perform Dickey-Fuller Test
+wma10.3 <- na.exclude(wma10.3)
+adf.test(wma10.3)
+#wma10.3 to be used in analysis
+```
+
+
+```{r}
+# 44. Calculate elastic, volume weighted 10 day moving average
+evwma10 <- EVWMA(GSPC.log$Close, GSPC.log$Volume)
+summary(evwma10)
+
+# Perform Dickey-Fuller Test
+evwma10.2 <- na.exclude(evwma10)
+adf.test(evwma10.2)
+
+#Difference due to serial correlation
+evwma10.3 <- evwma10.2
+evwma10.3 <- diff(evwma10.3)
+
+#Perform Dickey-Fuller Test
+evwma10.3 <- na.exclude(evwma10.3)
+adf.test(evwma10.3)
+```
+
+
+```{r}
+# 45 Calculate Zero lag exponential 10 day moving average
+zlema10 <- ZLEMA(GSPC.log$Close)
+summary(zlema10)
+
+# Perform Dickey-Fuller Test
+zlema10.2 <- na.exclude(zlema10)
+adf.test(zlema10.2)
+
+#Difference due to autocorrelation\
+zlema10.3 <- zlema10.2
+zlema10.3 <- diff(zlema10.3)
+
+# Perform Dickey-Fuller Test
+zlema10.3 <- na.exclude(zlema10.3)
+adf.test(zlema10.3)
+```
+
+
+```{r}
+# 46. Calculate Volume weighted 10 day average price
+vwap10 <- VWAP(GSPC.log$Close, GSPC.log$Volume)
+summary(vwap10)
+
+#Perform dickey-fuller test
+vwap10.2 <- na.exclude(vwap10)
+adf.test(vwap10.2)
+
+#Difference due to autocorrelation
+vwap10.3 <- vwap10.2
+vwap10.3 <- diff(vwap10.3)
+
+#Perform Dickey-Fuller Test
+vwap10.3 <- na.exclude(vwap10.3)
+adf.test(vwap10.3)
+```
+
+
+```{r}
+# 47. Calculate Hull 20 day moving average
+hma20 <- HMA(GSPC.log$Close)
+summary(hma20)
+
+# Perform Dickey-Fuller Test
+hma20.2 <- na.exclude(hma20)
+adf.test(hma20.2)
+
+#Difference due to serial correlation
+hma20.3 <- hma20.2
+hma20.3 <- diff(hma20.3)
+
+#Perform Dickey-Fuller Test
+hma20.3 <- na.exclude(hma20.3)
+adf.test(hma20.3)
+```
+
+
+```{r}
+# 48. Calculate Arnaud Legoux 9 day moving average
+alma9 <- ALMA(GSPC.log$Close)
+summary(alma9)
+
+#Perform Dickey-Fuller Test
+alma9.2 <- na.exclude(alma9)
+adf.test(alma9.2)
+
+#Difference due to autocorrelation
+alma9.3 <- alma9.2
+alma9.3 <- diff(alma9.2)
+
+#Perform Dickey-Fuller Test
+alma9.3 <- na.exclude(alma9.3)
+adf.test(alma9.3)
+```
+
+
+```{r}
+# 49. Calculate simple 20 day moving average
+sma20 <- SMA(GSPC.log$Close, 20)
+summary(sma20)
+
+#Perform Dickey-Fuller Test
+sma20.2 <- na.exclude(sma20)
+adf.test(sma20.2)
+
+#Difference Due to autocorrelation
+sma20.3 <- sma20.2
+sma20.3 <- diff(sma20.3)
+
+#Perform Dickey-Fuller Test
+sma20.3 <- na.exclude(sma20.3)
+adf.test(sma20.3)
+```
+
+
+```{r}
+# 50. Calculate double expoential 20 day moving average
+dema20 <- DEMA(GSPC.log$Close, 20)
+summary(dema20)
+
+#Perform dickey-Fuller Test
+dema20.2 <- na.exclude(dema20)
+adf.test(dema20.2)
+
+#Difference due to autocorrelation
+dema20.3 <- dema20.2
+dema20.3 <- diff(dema20.3)
+
+#Perform Dickey Fuller Test
+dema20.3 <- na.exclude(dema20.3)
+adf.test(dema20.3)
+```
+
+
+```{r}
+# 51. Calculate elastic, volume weighted 20 day moving average
+evwma20 <- EVWMA(GSPC.log$Close, GSPC.log$Volume, 20)
+summary(evwma20)
+
+#Perform Dickey-Fuller Test
+evwma20.2 <- na.exclude(evwma20)
+adf.test(evwma20.2)
+
+#Differenec due to autocorrelation
+evwma20.3 <- evwma20.2
+evwma20.3 <- diff(evwma20.3)
+
+#Perform Dickey-Fuller Test
+evwma20.3 <- na.exclude(evwma20.3)
+adf.test(evwma20.3)
+```
+
+
+```{r}
+# 52. Calculate Zero lag exponential 20 day moving average 
+zlema20 <- ZLEMA(GSPC.log$Close, 20)
+summary(zlema20)
+
+#Perform Dickey-Fuller Test
+zlema20.2 <- na.exclude(zlema20)
+adf.test(zlema20.2)
+
+#Difference due to autocorrelation
+zlema20.3 <- zlema20.2
+zlema20.3 <- diff(zlema20.3)
+
+#Perform Dickey-Fuller TEst
+zlema20.3 <- na.exclude(zlema20.3)
+adf.test(zlema20.3)
+```
+
+
+```{r}
+# 53. Calculate Signal to Noise Ratio over 10 days
+snr10 <- SNR(HLC(GSPC.log), 10)
+summary(snr10)
+
+#Perform Dickey_Fuller test
+snr10.2 <- na.exclude(snr10)
+adf.test(snr10.2)
+```
+
+
+```{r}
+# 54. Calculate signal to norise ratio over 20 days
+snr20 <- SNR(HLC(GSPC.log), 20)
+summary(snr20)
+
+#Perform Dickey-Fuller Test
+snr20.2 <- na.exclude(snr20)
+adf.test(snr20.2)
+```
+
+```{r}
+# 55. Calculate Stochastic Oscillators
+stoch_osc <- stoch(HLC(GSPC.log))
+summary(stoch_osc)
+
+#Perform Dickey-Fuller Test
+stoch_osc.2 <- na.exclude(stoch_osc)
+adf.test(stoch_osc.2$fastK)
+adf.test(stoch_osc.2$fastD)
+adf.test(stoch_osc.2$slowD)
+```
+
+
+```{r}
+# 56. Calculate Stochastic Momentum Indexes
+stoch_smi <- SMI(HLC(GSPC.log))
+summary(stoch_smi)
+
+#Perform Dickey-Fuller Test
+stoch_smi.2 <- na.exclude(stoch_smi)
+adf.test(stoch_smi.2$SMI)
+adf.test(stoch_smi.2$signal)
+```
+
+```{r}
+# 57. Calculate Stochastic WPR 
+stoch_wpr <- WPR(HLC(GSPC.log))
+summary(stoch_wpr)
+
+#Perform Dickey-Fuller Test
+stoch_wpr.2 <- na.exclude(stoch_wpr)
+adf.test(stoch_wpr.2)
+```
+
+
+```{r}
+# 58. Calculate stochastic 2MA
+stoch_2ma <- stoch(HLC(GSPC.log),
+                   maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA)) )
+summary(stoch_2ma)
+
+#Perform Dickey-Fuller Test
+stoch_2ma.2 <- na.exclude(stoch_2ma)
+adf.test(stoch_2ma.2$fastK)
+adf.test(stoch_2ma.2$fastD)
+adf.test(stoch_2ma.2$slowD)
+```
+
+
+```{r}
+# 59. Calculate SMI 3MA
+smi_3ma <- SMI(HLC(GSPC.log),
+               maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA)) )
+summary(smi_3ma)
+
+#Perform Dickey-Fuller Test
+smi_3ma.2 <- na.exclude(smi_3ma)
+adf.test(smi_3ma.2$SMI)
+adf.test(smi_3ma.2$signal)
+```
+
+
+```{r}
+# 60 Calculate stochastic RSI
+stoch_rsi <- stoch(RSI(GSPC.log$Close))
+summary(stoch_rsi)
+
+#Perform Dickey-Fuller Test
+stoch_rsi.2 <- na.exclude(stoch_rsi)
+adf.test(stoch_rsi.2$fastK)
+adf.test(stoch_rsi.2$fastD)
+adf.test(stoch_rsi.2$slowD)
+```
+
+
+```{r}
+# 61 Calculate Trend Detection Index 20 days
+tdi20 <- TDI(GSPC.log$Close)
+summary(tdi20)
+
+#Perform Dickey-Fuller Test
+tdi20.2 <- na.exclude(tdi20)
+adf.test(tdi20.2$tdi)
+adf.test(tdi20.2$di)
+```
+
+
+```{r}
+# 62. Calculate Trend Detection Index 30 days
+tdi30 <- TDI(GSPC.log$Close, 30)
+summary(tdi30)
+
+#Perform Dickey-Fuller Test
+tdi30.2 <- na.exclude(tdi30)
+adf.test(tdi30.2$tdi)
+adf.test(tdi30.2$di)
+```
+
+
+```{r}
+# 63. Calculate Triple Smoothed Exponential Oscillator
+trix20 <- TRIX(GSPC.log$Close)
+summary(trix20)
+
+#Perform Dickey_fuller test
+trix20.2 <- na.exclude(trix20)
+adf.test(trix20.2$TRIX)
+adf.test(trix20.2$signal)
+```
+
+
+```{r}
+# 64. Calculate TRIX 4 moving averages
+trix_4 <- TRIX(GSPC.log$Close,
+               maType=list(list(SMA), list(EMA, wilder=TRUE), list(SMA), list(DEMA)))
+summary(trix_4)
+
+#Perform Dickey-Fuller test
+trix_4.2 <- na.exclude(trix_4)
+adf.test(trix_4.2$TRIX)
+adf.test(trix_4.2$signal)
+```
+
+
+```{r}
+# 65. Calculate ultimate oscillator
+ult_osc <- ultimateOscillator(HLC(GSPC.log))
+summary(ult_osc)
+
+#Perform Dickey-Fuller Test
+ult_osc.2 <- na.exclude(ult_osc)
+adf.test(ult_osc.2)
+```
+
+
+```{r}
+# 66. Calculate vertical horizontal filter close
+vhf_close <- VHF(GSPC.log$Close)
+summary(vhf_close)
+
+#Perform Dickey-fuller test
+vhf_close.2 <- na.exclude(vhf_close)
+adf.test(vhf_close.2)
+```
+
+
+```{r}
+# 67. Calculate vertical horizontal filter High low
+vhf_hilo <- VHF(HLC(GSPC.log))
+summary(vhf_hilo)
+
+#Perform Dickey-Fuller Test
+vhf_hilo.2 <- na.exclude(vhf_hilo)
+adf.test(vhf_hilo.2)
+```
+
+
+```{r}
+# 68. Calculate close to close volatility
+v_close <- volatility(OHLC(GSPC.log), calc = "close")
+summary(v_close)
+
+#Perform Dickey-Fuller Test
+v_close.2 <- na.exclude(v_close)
+adf.test(v_close.2)
+```
+
+
+```{r}
+# 69. Calculate close to close with a mean of 0 volatility
+v_close0 <- volatility(OHLC(GSPC.log), calc="close", mean0=TRUE)
+summary(v_close0)
+
+#Perform Dickey-Fuller Test
+v_close0.2 <- na.exclude(v_close0)
+adf.test(v_close0.2)
+```
+
+
+```{r}
+# 70. Calcualte garman volatility
+v_gk <- volatility(OHLC(GSPC.log), calc="garman")
+summary(v_gk)
+
+#Perform Dickey-Fuller Test
+v_gk.2 <- na.exclude(v_gk)
+adf.test(v_gk.2)
+```
+
+
+```{r}
+# 71. Calculate parkinson volatility
+v_par <- volatility(OHLC(GSPC.log), calc = "parkinson")
+summary(v_par)
+
+#Perform Dickey-Fuller Test
+v_par.2 <- na.exclude(v_par)
+adf.test(v_par.2)
+```
+
+
+```{r}
+# 72. Calculate rogers satchell volatility
+v_rogsat <- volatility(OHLC(GSPC.log), calc = "rogers.satchell")
+summary(v_rogsat)
+
+#Perform Dickey-Fuller Test
+v_rogsat.2 <- na.exclude(v_rogsat)
+adf.test(v_rogsat.2)
+```
+
+
+```{r}
+# 73. Calculate garman klass yang zhang volatility
+v_gkyz <- volatility(OHLC(GSPC.log), calc = "gk.yz")
+summary(v_gkyz)
+
+#Perform Dickey-Fuller Test
+v_gkyz.2 <- na.exclude(v_gkyz)
+adf.test(v_gkyz.2)
+```
+
+
+```{r}
+# 74. Calculate yang zhang volatility
+v_yz <- volatility(OHLC(GSPC.log), calc = "yang.zhang")
+summary(v_yz)
+
+#Perform Dickey-Fuller TEst
+v_yz.2 <- na.exclude(v_yz)
+adf.test(v_yz.2)
+```
+
+
+```{r}
+# 75. Calculate Williams Accumulation / Distribution
+williams_ad <- williamsAD(HLC(GSPC.log))
+summary(williams_ad)
+
+#Perform Dickey-Fuller test
+williams_ad.2 <- na.exclude(williams_ad)
+adf.test(williams_ad.2)
+
+#Difference due to autocorrelation
+williams_ad.3 <- williams_ad.2
+williams_ad.3 <- diff(williams_ad.3)
+
+#Perform Dickey-Fuller Test
+williams_ad.3 <- na.exclude(williams_ad.3)
+adf.test(williams_ad.3)
+```
+
+
+```{r}
+# 76. Calculate Williams % R
+wpr <- WPR(HLC(GSPC.log))
+summary(wpr)
+
+#Perform Dickey-Fuller Test
+wpr.2 <- na.exclude(wpr)
+adf.test(wpr.2)
+```
+
+```{r}
+# 77. Calculate Zig Zag 10
+zigzag10 <- ZigZag(GSPC.log$High, GSPC.log$Low)
+summary(zigzag10)
+
+#Perform Dickey-Fuller Test
+zigzag10.2 <- na.exclude(zigzag10)
+adf.test(zigzag10.2)
+
+#Difference due to autocorrelation
+zigzag10.3 <- zigzag10.2
+zigzag10.3 <- diff(zigzag10.3)
+
+#Perform Dickey_Fuller Test
+zigzag10.3 <- na.exclude(zigzag10.3)
+adf.test(zigzag10.3)
+
+#Difference due to autocorrelation
+zigzag10.4 <- zigzag10.3
+zigzag10.4 <- diff(zigzag10.4)
+
+#Perform Dickey_Fuller Test
+zigzag10.4 <- na.exclude(zigzag10.4)
+adf.test(zigzag10.4)
+```
+
+
+```{r}
+#78. Calculate Zig Zag 20
+zigzag20 <- ZigZag(GSPC.log$High, GSPC.log$Low, 20)
+summary(zigzag20)
+
+#Perform Dickey-Fuller TEst
+zigzag20.2 <- na.exclude(zigzag20)
+adf.test(zigzag20.2)
+
+#difference due to autocorrelation
+zigzag20.3 <- zigzag20.2
+zigzag20.3 <- diff(zigzag20.3)
+
+#Perform Dickey-Fuller Test
+zigzag20.3 <- na.exclude(zigzag20.3)
+adf.test(zigzag20.3)
+
+#difference due to autocorrelation
+zigzag20.4 <- zigzag20.3
+zigzag20.4 <- diff(zigzag20.4)
+
+#Perform Dickey-Fuller Test
+zigzag20.4 <- na.exclude(zigzag20.4)
+adf.test(zigzag20.4)
+```
+
+
+```{r}
+#Combine all data
+my_final <- merge(GSPC.log, alma9.3, join = "left")
+my_final <- merge(my_final, aroon20, join = "left")
+my_final <- merge(my_final, atr14.3, join = "left")
+my_final <- merge(my_final, bbands20.3, join = "left")
+my_final <- merge(my_final, cci20, join = "left")
+my_final <- merge(my_final, chaikin_ad.3, join = "left")
+my_final <- merge(my_final, chaikin_mf, join = "left")
+my_final <- merge(my_final, chaikin_vol, join = "left")
+my_final <- merge(my_final, close_lv, join = "left")
+my_final <- merge(my_final, cmo, join = "left")
+my_final <- merge(my_final, dc.3, join = "left")
+my_final <- merge(my_final, dema10.3, join = "left")
+my_final <- merge(my_final, dema20.3, join = "left")
+my_final <- merge(my_final, dvi, join = "left")
+my_final <- merge(my_final, ema10.3, join = "left")
+my_final <- merge(my_final, emv, join = "left")
+my_final <- merge(my_final, evwma10.3, join = "left")
+my_final <- merge(my_final, evwma20.3, join = "left")
+my_final <- merge(my_final, gmma.3, join = "left")
+my_final <- merge(my_final, hma20.3, join = "left")
+my_final <- merge(my_final, kst, join = "left")
+my_final <- merge(my_final, kst4ma, join = "left")
+my_final <- merge(my_final, macd, join = "left")
+my_final <- merge(my_final, macd2, join = "left")
+my_final <- merge(my_final, mfi, join = "left")
+my_final <- merge(my_final, mom, join = "left")
+my_final <- merge(my_final, obv.3, join = "left")
+my_final <- merge(my_final, pbands.3, join = "left")
+my_final <- merge(my_final, percent_rank, join = "left")
+my_final <- merge(my_final, price_dpo, join = "left")
+my_final <- merge(my_final, roc, join = "left")
+my_final <- merge(my_final, rsi, join = "left")
+my_final <- merge(my_final, rsima1, join = "left")
+my_final <- merge(my_final, rsima2, join = "left")
+my_final <- merge(my_final, runmad10, join = "left")
+my_final <- merge(my_final, runmax10.3, join = "left")
+my_final <- merge(my_final, runmean10.3, join = "left")
+my_final <- merge(my_final, runmedian10.3, join = "left")
+my_final <- merge(my_final, runmin10.3, join = "left")
+my_final <- merge(my_final, runsd10, join = "left")
+my_final <- merge(my_final, runsum10.3, join = "left")
+my_final <- merge(my_final, sar.3, join = "left")
+my_final <- merge(my_final, sma10.3, join = "left")
+my_final <- merge(my_final, sma20.3, join = "left")
+my_final <- merge(my_final, smi_3ma, join = "left")
+my_final <- merge(my_final, snr10, join = "left")
+my_final <- merge(my_final, snr20, join = "left")
+my_final <- merge(my_final, stoch_2ma, join = "left")
+my_final <- merge(my_final, stoch_osc, join = "left")
+my_final <- merge(my_final, stoch_rsi, join = "left")
+my_final <- merge(my_final, stoch_smi, join = "left")
+my_final <- merge(my_final, stoch_wpr, join = "left")
+my_final <- merge(my_final, tdi20, join = "left")
+my_final <- merge(my_final, tdi30, join = "left")
+my_final <- merge(my_final, trix_4, join = "left")
+my_final <- merge(my_final, trix20, join = "left")
+my_final <- merge(my_final, ult_osc, join = "left")
+my_final <- merge(my_final, v_close, join = "left")
+my_final <- merge(my_final, v_close0, join = "left")
+my_final <- merge(my_final, v_gk, join = "left")
+my_final <- merge(my_final, v_gkyz, join = "left")
+my_final <- merge(my_final, v_par, join = "left")
+my_final <- merge(my_final, v_rogsat, join = "left")
+my_final <- merge(my_final, v_yz, join = "left")
+my_final <- merge(my_final, vhf_close, join = "left")
+my_final <- merge(my_final, vhf_hilo, join = "left")
+my_final <- merge(my_final, volume_dpo, join = "left")
+my_final <- merge(my_final, vwap10.3, join = "left")
+my_final <- merge(my_final, wildersum10.3, join = "left")
+my_final <- merge(my_final, williams_ad.3, join = "left")
+my_final <- merge(my_final, wma10.3, join = "left")
+my_final <- merge(my_final, wpr, join = "left")
+my_final <- merge(my_final, wwdmi, join = "left")
+my_final <- merge(my_final, zigzag10.4, join = "left")
+my_final <- merge(my_final, zigzag20.4, join = "left")
+my_final <- merge(my_final, zlema10.3, join = "left")
+my_final <- merge(my_final, zlema20, join = "left")
+```
+
+```{r}
+#Review data
+head(my_final)
+tail(my_final)
+str(my_final)
+summary(my_final)
+dim(my_final)
+length(my_final)
+sum(is.na(my_final))
+```
+
+
+```{r}
+## Reduce data from January 1, 2014 to present. 
+fd1 <- my_final[index(my_final) >= "2014-01-01"]
+fd1 <- fd1[index(fd1) <= "2019-03-30"]
+```
+
+
+```{r}
+#inspect data
+head(fd1)
+summary(fd1)
+dim(fd1)
+```
+
+
+```{r}
+# find NAs
+sum(is.na(fd1))
+tail(fd1, n = 130)
+```
+
+zigzag10 and zigzag20 have 128 missing values each at the bottom because of the way they are calculated.  These values could be imputed by a number of methods (KNN, Replace with Mean, Forward Propagation).  On this occassion because the number of missing data points is so small and they are at the bottom of the object so their removal will not cause any disruption to the time-series
+
+```{r}
+# Remove NAs
+fd1 <- na.omit(fd1)
+
+# Count number of rows and columns in final data
+dim(fd1)
+```
+
+
+## Correlation ## 
+
+```{r}
+#convert to data.frame
+library("zoo")
+train.df <- fortify.zoo(fd1)
+```
+
+```{r}
+#check class
+class(train.df)
+```
+
+
+```{r}
+#review structure
+head(train.df)
+str(train.df)
+```
+
+
+```{r}
+#First make binary dependent variable
+price <- train.df$Close - train.df$Open
+movement <- ifelse(price > 0, "UP", "DOWN")
+movement <- factor(movement)
+class(movement)
+
+#add to dataframe
+train.df$movement <- movement
+class(train.df$movement)
+
+#create data.frame of index and Con_daily return
+Daily_return <- train.df[c("Index", "Con_daily_return")] 
+
+#Remove Con_dail_return from train.df
+train.df$Con_daily_return <- NULL
+
+head(train.df)
+ncol(train.df)
+# Make movement the 1st variable in train set
+train.df <- train.df[,c(130, 1:129)]
+
+head(train.df)
+```
+
+
+```{r}
+#create new data_frame with all variables but the index
+my_cor_data <- train.df[c(-2)]
+```
+
+```{r}
+#inspect correlation data.frame
+head(my_cor_data)
+```
+
+```{r}
+colnames(my_cor_data)
+ncol(my_cor_data)
+```
+
+
+```{r}
+# Produce correlation matrix 
+cor_matrix <- cor(my_cor_data[, c(2:129)])
+
+# Print correlation matrix
+print(cor_matrix)
+```
+
+
+```{r}
+#Load useful packages
+library("corrplot")
+# Plot the correlation matrix
+corrplot(cor_matrix)
+```
+Too many correlations to visualize or check manually. 
+
+
+```{r}
+#Find correlations above .8
+head(cor_matrix)
+hc <- findCorrelation(cor_matrix, cutoff = 0.8)
+hc <- sort(hc)
+```
+
+
+```{r}
+#Inspect columns to remove
+cols_to_remove <- cor_matrix[, c(hc)]
+ncol(cols_to_remove)
+colnames(cols_to_remove)
+```
+
+```{r}
+#Create copy of my_data_frame
+my_df1 <- train.df
+head(my_df1)
+```
+
+
+```{r}
+#Removed that are too highly correlated
+my_df1$Index <- NULL
+my_df1$Open <- NULL
+my_df1$High <- NULL
+my_df1$Low <- NULL
+my_df1$Close <- NULL
+my_df1$Adjusted <- NULL
+my_df1$Close.1 <- NULL
+my_df1$oscillator <- NULL
+my_df1$mavg <- NULL
+my_df1$pctB <- NULL
+my_df1$cci <- NULL
+my_df1$chaikin_ad.3<- NULL
+my_df1$cmo <- NULL
+my_df1$mid <- NULL
+my_df1$DEMA <- NULL
+my_df1$DEMA.1 <- NULL
+my_df1$dvi.mag <- NULL
+my_df1$dvi <- NULL
+my_df1$EMA.1 <- NULL
+my_df1$emv <- NULL
+my_df1$evwma10.3 <- NULL
+my_df1$evwma20.3 <- NULL
+my_df1$short.lag.3 <- NULL
+my_df1$short.lag.5 <- NULL
+my_df1$short.lag.8 <- NULL
+my_df1$short.lag.10 <- NULL
+my_df1$short.lag.12 <- NULL
+my_df1$short.lag.15 <- NULL
+my_df1$long.lag.30 <- NULL
+my_df1$long.lag.35 <- NULL
+my_df1$long.lag.40 <- NULL
+my_df1$long.lag.45 <- NULL
+my_df1$long.lag.50 <- NULL
+my_df1$long.lag.60 <- NULL
+my_df1$hma20.3 <- NULL
+my_df1$kst <- NULL
+my_df1$signal <- NULL
+my_df1$kst.1 <- NULL
+my_df1$signal.1 <- NULL
+my_df1$macd <- NULL
+my_df1$signal.2 <- NULL
+my_df1$macd.1 <- NULL
+my_df1$signal.3 <- NULL
+my_df1$Close.2 <- NULL
+my_df1$center <- NULL
+my_df1$Close.4 <- NULL
+my_df1$rsi <- NULL
+my_df1$rsi.1 <- NULL
+my_df1$rsi.2 <- NULL
+my_df1$runmax10.3 <- NULL
+my_df1$runmean10.3 <- NULL
+my_df1$runmedian10.3 <- NULL
+my_df1$runsd10 <- NULL
+my_df1$runsum10.3 <- NULL
+my_df1$SMA <- NULL
+my_df1$SMA.1 <- NULL
+my_df1$SMI <- NULL
+my_df1$signal.4 <- NULL
+my_df1$fastK <- NULL
+my_df1$fastD <- NULL
+my_df1$slowD <- NULL
+my_df1$fastK.1 <- NULL
+my_df1$fastD.1 <- NULL
+my_df1$slowD.1 <- NULL
+my_df1$fastD.2 <- NULL
+my_df1$SMI.1 <- NULL
+my_df1$signal.5 <- NULL
+my_df1$Close.7 <- NULL
+my_df1$di <- NULL
+my_df1$di.1 <- NULL
+my_df1$TRIX <- NULL
+my_df1$TRIX.1 <- NULL
+my_df1$signal.7 <- NULL
+my_df1$v_close <- NULL
+my_df1$v_close0 <- NULL
+my_df1$v_gk <- NULL
+my_df1$v_gkyz <- NULL
+my_df1$v_par <- NULL
+my_df1$v_rogsat <- NULL
+my_df1$v_yz <- NULL
+my_df1$vhf_hilo <- NULL
+my_df1$VWAP <- NULL
+my_df1$wma10.3 <- NULL
+my_df1$Close.9 <- NULL
+my_df1$zigzag10.4 <-NULL
+my_df1$zlema10.3 <- NULL
+my_df1$zlema20 <- NULL
+```
+
+
+## Filter Feature Selection ##
+
+
+```{r}
+library("FSelector")
+head(my_df1)
+set.seed(123)
+weights <- random.forest.importance(movement ~ ., my_df1, importance.type = 1)
+print(weights)
+
+#select top 20 predictors
+filter1 <- cutoff.k(weights, 20)
+print(filter1)
+```
+
+
+```{r}
+#create data frame using selected features
+filter1.df <- train[c("movement", "clv", "williams_ad.3", "obv", "fastK.2", "trueLow", "trueHigh", "percent_rank", "Close.8", "runmin10.3", "tr", "sar", "high", "EMA", "maEMV", "atr", "dvi.str", "slowD.2",  "Close.3", "DIp", "dn.1")]
+
+head(filter1.df)
+dim(filter1.df)
+```
+
+
+```{r}
+#10-fold cross validation method used
+library("caret")
+trainFilter1 <- trainControl(method = "cv", number = 10)
+```
+
+## Train different algorithims ##
+
+#K-Nearest Neighbours (knn)
+```{r}
+fit.knn.filter <- train(movement ~. , data = filter1.df, method = "knn",
+                 metric = "Accuracy", preProcess = c("range"), trControl = trainFilter1)
+```
+
+#Classification & Regression Trees (CART)
+```{r}
+fit.cart.filter <- train(movement ~ . , data = filter1.df, method = "rpart", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainFilter1)
+```
+
+#Naive Bayes (NB)
+```{r}
+fit.nb.filter <- train(movement ~ . , data = filter1.df, method = "nb", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainFilter1)
+```
+
+#SVM with Radial Basis Function (svm)
+```{r}
+fit.svm.filter <- train(movement ~ . , data = filter1.df, method = "svmRadial", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainFilter1)
+```
+
+#evaluate algorithims using accuracy metric
+```{r}
+set.seed(5)
+results.filter <- resamples(list(KNN=fit.knn.filter, CART=fit.cart.filter, NB=fit.nb.filter, SVM=fit.svm.filter))
+summary(results.filter)
+dotplot(results.filter)
+```
+
+#Wrapper Feature Selection
+```{r}
+library("mlbench")
+library("caret")
+myTimeControl <- trainControl(method = "timeslice",
+                               initialWindow = 252,
+                               horizon = 252,
+                               fixedWindow = TRUE)
+ 
+plsFitTime <- train(movement ~.,
+                     data = my_df1,
+                     method = "pls",
+                     preProc = c("center", "scale"),
+                     trControl = myTimeControl)
+plsFitTime
+```
+
+importance <- varImp(model, scale=FALSE)
+```{r}
+importance <- varImp(plsFitTime, scale=FALSE)
+print(importance)
+plot(importance)
+```
+
+```{r}
+#create data frame using selected features - importance above 0.02
+wrapper1.df <- my_df1[c("movement", "obv", "clv", "williams_ad.3", "trueLow", "trueHigh", "fastK.2")]
+
+head(wrapper1.df)
+dim(wrapper1.df)
+```
+
+```{r}
+#10-fold cross validation method used
+library("caret")
+trainWrapper1 <- trainControl(method = "cv", number = 10)
+```
+
+## Train different algorithims ##
+
+#K-Nearest Neighbours (knn)
+```{r}
+fit.knn.wrapper <- train(movement ~. , data = wrapper1.df, method = "knn",
+                 metric = "Accuracy", preProcess = c("range"), trControl = trainWrapper1)
+```
+
+#Classification & Regression Trees (CART)
+```{r}
+fit.cart.wrapper <- train(movement ~ . , data = wrapper1.df, method = "rpart", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainWrapper1)
+```
+
+#Naive Bayes (NB)
+```{r}
+fit.nb.wrapper <- train(movement ~ . , data = wrapper1.df, method = "nb", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainWrapper1)
+```
+
+#SVM with Radial Basis Function (svm)
+```{r}
+fit.svm.wrapper <- train(movement ~ . , data = wrapper1.df, method = "svmRadial", 
+                  metric = "Accuracy", preProcess = c("range"), trControl = trainWrapper1)
+```
+
+#evaluate algorithims using accuracy metric
+```{r}
+results.wrapper <- resamples(list(KNN=fit.knn.wrapper, CART=fit.cart.wrapper, NB=fit.nb.wrapper, SVM=fit.svm.wrapper))
+summary(results.wrapper)
+dotplot(results.wrapper)
+``` 
